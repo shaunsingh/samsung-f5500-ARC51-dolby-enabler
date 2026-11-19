@@ -1,0 +1,39 @@
+#!/mnt/bin/busybox sh
+. /dtv/SGO.env
+
+case $1 in
+	start)
+	for USB in /dtv/usb/sd* ; do
+		[ -e "$USB/STOP_TELNET" ] && exit 0
+	done
+
+	# SRS_module unlocks mount --bind (required by hosts-block init scripts)
+	insmod $MOD_DIR/kernel/drivers/pty/SRS_module.ko 2>/dev/null
+
+	# Only start telnetd (port 23) when ENABLE_SHELL exists on USB root
+	ENABLE_SHELL=0
+	for USB in /dtv/usb/sd* ; do
+		[ -e "$USB/ENABLE_SHELL" ] && ENABLE_SHELL=1
+	done
+	if [ "$ENABLE_SHELL" = "1" ]; then
+		insmod $MOD_DIR/kernel/drivers/pty/ptys.ko 2>/dev/null
+		sleep 1
+		$SYSROOT/bin/busybox2 telnetd -p 23 -l $SYSROOT/bin/ash &
+		$SYSROOT/bin/busybox mount -o bind /mtd_rwarea/profile /etc/profile 2>/dev/null
+		if [ ! -e /mtd_rwarea/passwd ]; then
+			echo "root:saJvQKUdIxRW2:0:0:SamyGO secured Root:$NEW_HOME:$SYSROOT/bin/ash" > /mtd_rwarea/passwd
+		fi
+		$SYSROOT/bin/busybox mount -o bind /mtd_rwarea/passwd /etc/passwd 2>/dev/null
+	fi
+	;;
+	stop)
+	killall busybox2 2>/dev/null
+	;;
+	status)
+	ps w | grep telnetd | grep -v grep || echo "telnetd disabled (create USB ENABLE_SHELL to enable)"
+	;;
+	*)
+	echo "Usage: $0 {start|stop|status}" 1>&2
+	exit 0
+	;;
+esac

@@ -1,7 +1,8 @@
 # samyGOso payloads for exeTV: ARMv7, soft-float EABI, glibc 2.14.1.
 #
 #   make            build/*.so
-#   make test       run them against test/fake_exetv.c under qemu-arm
+#   make test       check src/gamma_tables.h, then run the libraries against
+#                   test/fake_exetv.c under qemu-arm
 #   make lint       shellcheck the boot scripts
 #   make prebuilt   copy build/*.so to prebuilt/
 
@@ -56,6 +57,7 @@ build/fake_exetv: test/fake_exetv.c | build
 	$(CC) $(ARCH) $(WARN) -O1 -no-pie -rdynamic $(FIRMWARE:%=-Wl,--section-start=.fw.%) $< -o $@ -lpthread -ldl
 
 test: $(LIBS) build/fake_exetv
+	python3 scripts/gamma_curves.py --check
 	$(QEMU) build/fake_exetv $(abspath build/libPDPTune.so build/libDDCRAM_EDID.so)
 
 lint:

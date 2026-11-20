@@ -34,7 +34,7 @@
 #include "gamma_tables.h"
 #include "samygo.h"
 
-#define VERSION  "2.2.0"
+#define VERSION  "2.3.0"
 #define LOG      "/dtv/PDPTune.log"
 #define say(...) sgo_log(LOG, __VA_ARGS__)
 

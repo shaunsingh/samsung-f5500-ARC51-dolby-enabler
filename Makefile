@@ -12,14 +12,15 @@ NM    := $(CROSS)nm
 STRIP := $(CROSS)strip
 QEMU  ?= qemu-arm -L /usr/$(CROSS:-=)
 
-LIBS := build/libDDCRAM_EDID.so build/libPDPTune.so
+LIBS := build/libDDCRAM_EDID.so build/libPDPTune.so build/libCMSApply.so \
+        build/libCMProbe.so build/libCMFactory.so build/libHPD.so build/libAudioProbe.so
 ARCH := -march=armv7-a -marm -mfloat-abi=soft
 WARN := -std=gnu11 -Wall -Wextra -Werror
 
 # A payload names no libraries of its own: once inside exeTV its imports bind
 # to the libc already loaded there, whatever toolchain built it. The hardening
 # that distribution compilers default to would import helpers, so it is off.
-CFLAGS  := $(ARCH) $(WARN) -O2 -fPIC -fvisibility=hidden -fno-stack-protector -U_FORTIFY_SOURCE
+CFLAGS  := $(ARCH) $(WARN) -O2 -fPIC -fvisibility=hidden -fno-stack-protector -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
 LDFLAGS := -shared -nostdlib -Wl,--hash-style=both
 
 # libPDPTune leaves hooks and a thread behind, so it must never be unloaded.
@@ -29,8 +30,8 @@ build/libPDPTune.so: LDFLAGS += -Wl,-z,nodelete
 # The headers of a newer libc redirect some functions to symbols those lack
 # (strtol to __isoc23_strtol, for one), which would only show on the TV.
 IMPORTS := __errno_location __isoc99_fscanf close dlclose dlopen dlsym fclose fopen64 free malloc memcmp memcpy memset \
-           mmap64 mprotect munmap open64 pthread_create pthread_detach pthread_mutex_lock pthread_mutex_unlock \
-           read snprintf sprintf strcasecmp strcmp strerror strlen strncasecmp strrchr sysconf usleep vsnprintf \
+           mmap64 mprotect munmap open64 pthread_create pthread_detach pthread_mutex_lock pthread_mutex_unlock raise strchr \
+           fflush fprintf fputc fwrite read snprintf sprintf strcasecmp strcmp strerror strlen strncasecmp strncmp strrchr sysconf usleep vfprintf vsnprintf \
            write
 
 # Where the firmware has what libPDPTune looks up; see g_firmware there.

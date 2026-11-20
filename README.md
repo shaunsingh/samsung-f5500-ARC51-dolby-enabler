@@ -10,13 +10,17 @@
 ## Repository layout
 
 ```text
-src/       libDDCRAM_EDID.c, libPDPTune.c, gamma_tables.h, samygo.h
-init/      01_02_telnet.init, 99_91_DDCRAM_EDID.init, 99_92_PDPTune.init, run1.sh
-scripts/   patch_edid_51.py, gamma_curves.py
-test/      fake_exetv.c, the QEMU stand-in for exeTV
-prebuilt/  libDDCRAM_EDID.so, libPDPTune.so
-docs/      firmware-reference.md, validation.md
+src/            libDDCRAM_EDID.c, libPDPTune.c, libCMSApply.c, libCMProbe.c,
+                libCMFactory.c, libHPD.c, libAudioProbe.c, gamma_tables.h, samygo.h
+init/           boot scripts for the EDID patch and libPDPTune
+scripts/        patch_edid_51.py, gamma_curves.py, gamut/, re/
+test/           fake_exetv.c, the QEMU stand-in for the two boot payloads
+prebuilt/       the built libraries
+calibration/    picture-state files and this set's EDIDs
+docs/           firmware-reference.md, validation.md
 ```
+
+`libCMSApply` writes the BT.709 Custom preset. `libCMProbe` and `libCMFactory` only read the color tables. `libHPD` pulses hot-plug on HDMI3. `libAudioProbe` reads the external-output audio mode. The boot scripts do not load those four.
 
 ## Reference
 
@@ -177,7 +181,7 @@ Color Space → Custom, used with `GAMMA:2.4`:
 | Cyan | 37 | 56 | 51 | 0.74 |
 | Magenta | 46 | 0 | 50 | 1.03 |
 
-These dE00 figures are calculated from a 2014 measurement of a different PN60F5500, not from a meter on this panel. Blue and magenta cannot reach a BT.709 primary inside that measured native gamut. The checksums of the picture-state files and how they were restored are in [validation](docs/validation.md).
+These dE00 figures are calculated from a 2014 measurement of a different PN60F5500, not from a meter on this panel. Blue and magenta cannot reach a BT.709 primary inside that measured native gamut. `libCMSApply` applies this preset: `BT709` selects Custom, writes these six triples, and saves Movie. With no argument it returns the picture to Native. The model is in `scripts/gamut/`. The saved picture state is [calibration/PicSettings_HDMI3_2_BT709.bin](calibration/PicSettings_HDMI3_2_BT709.bin). The other picture files, and how they were restored, are in [validation](docs/validation.md) and [calibration](calibration/README.md).
 
 ### Apply a configuration
 

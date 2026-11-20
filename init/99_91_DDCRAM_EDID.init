@@ -1,36 +1,34 @@
 #!/bin/sh
 #
-# Inject 5.1 EDID (Dolby Digital + DTS + 5.1 Speaker Allocation) directly into
-# MStar MST12 on-chip HDMI DDCRAM at boot, pulsing HPD only for ports that changed.
+# Programs the EDIDs in DDCRAM_port<n>.bin, kept next to libDDCRAM_EDID.so,
+# into the HDMI receiver at boot. An empty file STOP or STOP_EDID in the root
+# of a USB stick skips it.
 #
+# shellcheck source=/dev/null
 . /dtv/SGO.env
 
-SODIR=$SYSROOT/opt/privateer/usr/libso
-[ "$LIBSO_DIR" ] && SODIR=$LIBSO_DIR
-
-stop_bootloop()
-{
-	for USB in /dtv/usb/sd* ; do
-		[ -e "$USB/STOP" ] && echo "STOP found. Exiting." && exit 1
-		[ -e "$USB/STOP_EDID" ] && echo "STOP_EDID found. Exiting." && exit 1
-	done
-}
+LIB="${LIBSO_DIR:-$SYSROOT/opt/privateer/usr/libso}/libDDCRAM_EDID.so"
+LOG=/dtv/DDCRAM_EDID.log
 
 case $1 in
 	start)
-	stop_bootloop
-	if [ -n "$(pidof exeTV)" ] && [ -f "$SODIR/libDDCRAM_EDID.so" ]; then
-		rm -f /dtv/DDCRAM_EDID.log
-		samyGOso -T -B -l "$SODIR/libDDCRAM_EDID.so" LOAD HPD
+	for usb in /dtv/usb/sd*; do
+		if [ -e "$usb/STOP" ] || [ -e "$usb/STOP_EDID" ]; then
+			echo "STOP file found, EDIDs left alone."
+			exit 0
+		fi
+	done
+	if [ -f "$LIB" ] && pidof exeTV > /dev/null; then
+		rm -f "$LOG"
+		samyGOso -T -B -l "$LIB" LOAD HPD
 	fi
 	;;
 	stop)
 	;;
 	status)
-	[ -f /dtv/DDCRAM_EDID.log ] && cat /dtv/DDCRAM_EDID.log || echo "Not run"
+	cat "$LOG" 2> /dev/null || echo "Not run"
 	;;
 	*)
-	echo "Usage: $0 {start|stop|status}" 1>&2
-	exit 0
+	echo "Usage: $0 {start|stop|status}" >&2
 	;;
 esac

@@ -1,39 +1,45 @@
 #!/mnt/bin/busybox sh
+#
+# Loads the kernel module that lets later scripts use mount --bind, and starts
+# a root telnet shell on port 23 only while the root of a USB stick holds a
+# file ENABLE_SHELL. The shell asks for no password: remove the file again
+# when done. A file STOP_TELNET skips all of it.
+#
+# shellcheck source=/dev/null
 . /dtv/SGO.env
+
+on_usb()
+{
+	for usb in /dtv/usb/sd*; do
+		[ -e "$usb/$1" ] && return 0
+	done
+	return 1
+}
 
 case $1 in
 	start)
-	for USB in /dtv/usb/sd* ; do
-		[ -e "$USB/STOP_TELNET" ] && exit 0
-	done
+	on_usb STOP_TELNET && exit 0
 
-	# SRS_module unlocks mount --bind (required by hosts-block init scripts)
-	insmod $MOD_DIR/kernel/drivers/pty/SRS_module.ko 2>/dev/null
+	insmod "$MOD_DIR/kernel/drivers/pty/SRS_module.ko" 2> /dev/null
 
-	# Only start telnetd (port 23) when ENABLE_SHELL exists on USB root
-	ENABLE_SHELL=0
-	for USB in /dtv/usb/sd* ; do
-		[ -e "$USB/ENABLE_SHELL" ] && ENABLE_SHELL=1
-	done
-	if [ "$ENABLE_SHELL" = "1" ]; then
-		insmod $MOD_DIR/kernel/drivers/pty/ptys.ko 2>/dev/null
+	if on_usb ENABLE_SHELL; then
+		insmod "$MOD_DIR/kernel/drivers/pty/ptys.ko" 2> /dev/null
 		sleep 1
-		$SYSROOT/bin/busybox2 telnetd -p 23 -l $SYSROOT/bin/ash &
-		$SYSROOT/bin/busybox mount -o bind /mtd_rwarea/profile /etc/profile 2>/dev/null
+		"$SYSROOT/bin/busybox2" telnetd -p 23 -l "$SYSROOT/bin/ash" &
+		"$SYSROOT/bin/busybox" mount -o bind /mtd_rwarea/profile /etc/profile 2> /dev/null
 		if [ ! -e /mtd_rwarea/passwd ]; then
 			echo "root:saJvQKUdIxRW2:0:0:SamyGO secured Root:$NEW_HOME:$SYSROOT/bin/ash" > /mtd_rwarea/passwd
 		fi
-		$SYSROOT/bin/busybox mount -o bind /mtd_rwarea/passwd /etc/passwd 2>/dev/null
+		"$SYSROOT/bin/busybox" mount -o bind /mtd_rwarea/passwd /etc/passwd 2> /dev/null
 	fi
 	;;
 	stop)
-	killall busybox2 2>/dev/null
+	killall busybox2 2> /dev/null
 	;;
 	status)
-	ps w | grep telnetd | grep -v grep || echo "telnetd disabled (create USB ENABLE_SHELL to enable)"
+	pidof busybox2 > /dev/null && echo "telnetd running" || echo "telnetd off (ENABLE_SHELL on USB enables it)"
 	;;
 	*)
-	echo "Usage: $0 {start|stop|status}" 1>&2
-	exit 0
+	echo "Usage: $0 {start|stop|status}" >&2
 	;;
 esac

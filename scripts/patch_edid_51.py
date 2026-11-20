@@ -1,166 +1,139 @@
 #!/usr/bin/env python3
-"""
-Surgically patch 256-byte Samsung F-MST HDMI EDID dumps (DDCRAM_port0..3.bin)
-to advertise Dolby Digital 5.1 (AC-3) and DTS 5.1 plus 5.1 Speaker Allocation
-while preserving all native video timings, monitor descriptors, and per-port
-CEC/HDMI physical addresses.
+"""Add Dolby Digital 5.1 and DTS 5.1 to the audio a 256-byte HDMI EDID advertises.
 
-Usage:
-    python3 scripts/patch_edid_51.py <input_dir_or_file> <output_dir_or_file>
+    patch_edid_51.py <dump.bin | directory of *.bin> <output file | directory>
+
+Only the CEA-861 extension block changes: the Audio Data Block gains an AC-3
+and a DTS descriptor, the Speaker Allocation Data Block gains the 5.1
+speakers, and the detailed timings behind them move up into the block's
+padding. Everything else, the physical address included, stays as dumped.
 """
 
-import os
 import sys
+from pathlib import Path
 
-EDID_MAGIC = bytes([0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00])
+HEADER = bytes.fromhex("00ffffffffffff00")
+DTD_SIZE = 18
 
-# Short Audio Descriptors (CEA-861):
-#   AC-3 (Dolby Digital): format=2, 6ch (5.1), 32/44.1/48 kHz, max 640 kbps
-SAD_AC3_51 = bytes([0x15, 0x07, 0x50])
-#   DTS: format=7, 6ch (5.1), 32/44.1/48 kHz, max 1536 kbps
-SAD_DTS_51 = bytes([0x3D, 0x07, 0xC0])
+# CEA-861 Short Audio Descriptors: format and channels, sample rates, bit rate / 8 kbps.
+AUDIO_LPCM_20 = bytes([0x09, 0x07, 0x07])  # 2 channels, 32/44.1/48 kHz, 16/20/24 bit
+AUDIO_FORMATS = {
+    2: bytes([0x15, 0x07, 0x50]),  # AC-3, 6 channels, 32/44.1/48 kHz, 640 kbps
+    7: bytes([0x3D, 0x07, 0xC0]),  # DTS, 6 channels, 32/44.1/48 kHz, 1536 kbps
+}
+SPEAKERS_51 = 0x0F  # front left/right, LFE, front centre, rear left/right
 
-
-def checksum_ok(block: bytes) -> bool:
-    return (sum(block) & 0xFF) == 0
-
-
-def parse_cea_blocks(ext: bytes):
-    if ext[0] != 0x02 or ext[1] < 0x03:
-        raise ValueError(f"Unsupported extension block header: {ext[0]:02x} {ext[1]:02x}")
-    dtd_off = ext[2]
-    if dtd_off < 4 or dtd_off > 127:
-        raise ValueError(f"Invalid DTD offset: {dtd_off}")
-    blocks = []
-    pos = 4
-    while pos < dtd_off:
-        tag = (ext[pos] >> 5) & 0x07
-        ln = ext[pos] & 0x1F
-        if pos + 1 + ln > dtd_off:
-            raise ValueError(f"Malformed CEA data block at offset {pos}")
-        blocks.append((tag, bytearray(ext[pos + 1 : pos + 1 + ln])))
-        pos += 1 + ln
-    dtd_tail = ext[dtd_off:127]
-    return blocks, dtd_off, dtd_tail
+TAG_AUDIO, TAG_VENDOR, TAG_SPEAKERS = 1, 3, 4
 
 
-def patch_edid(raw: bytes, include_dts: bool = True) -> bytes:
-    if len(raw) != 256:
-        raise ValueError(f"Expected 256 bytes, got {len(raw)}")
-    if raw[:8] != EDID_MAGIC:
-        raise ValueError("Invalid EDID header magic")
-    if not checksum_ok(raw[:128]) or not checksum_ok(raw[128:256]):
-        raise ValueError("Input EDID failed checksum validation")
+def data_blocks(cea: bytes) -> list[tuple[int, bytes]]:
+    """The (tag, payload) of each data block in a CEA-861 extension block."""
+    if cea[0] != 0x02 or cea[1] < 3:
+        raise ValueError(f"not a CEA-861 extension of version 3: {cea[:2].hex()}")
+    end = cea[2]
+    if not 4 <= end <= 127:
+        raise ValueError(f"bad detailed timing offset {end}")
 
-    base = bytes(raw[:128])
-    ext = bytes(raw[128:256])
-    blocks, orig_dtd_off, dtd_tail = parse_cea_blocks(ext)
+    blocks, at = [], 4
+    while at < end:
+        length = cea[at] & 0x1F
+        if at + 1 + length > end:
+            raise ValueError(f"data block at {at} runs past the data block collection")
+        blocks.append((cea[at] >> 5, cea[at + 1 : at + 1 + length]))
+        at += 1 + length
+    return blocks
 
-    new_blocks = []
-    found_audio = False
-    found_sadb = False
 
+def detailed_timings(cea: bytes) -> bytes:
+    """The 18-byte descriptors of a CEA-861 extension block, without its padding."""
+    at = start = cea[2]
+    while at + DTD_SIZE <= 127 and cea[at : at + 2] != b"\0\0":
+        at += DTD_SIZE
+    if any(cea[at:127]):
+        raise ValueError("unexpected data after the detailed timings")
+    return cea[start:at]
+
+
+def with_surround(blocks: list[tuple[int, bytes]]) -> list[tuple[int, bytes]]:
+    blocks = list(blocks)
+    for tag, default in ((TAG_AUDIO, AUDIO_LPCM_20), (TAG_SPEAKERS, bytes(3))):
+        if not any(t == tag for t, _ in blocks):
+            blocks.append((tag, default))
+
+    patched = []
     for tag, payload in blocks:
-        if tag == 1:  # Audio Data Block
-            found_audio = True
-            existing_sads = [bytes(payload[i : i + 3]) for i in range(0, len(payload), 3)]
-            existing_formats = {(s[0] >> 3) & 0x0F for s in existing_sads if len(s) == 3}
-            if 2 not in existing_formats:
-                payload.extend(SAD_AC3_51)
-            if include_dts and 7 not in existing_formats:
-                payload.extend(SAD_DTS_51)
-            if len(payload) > 31:
-                raise ValueError("Audio Data Block exceeds 31 bytes")
-            new_blocks.append((tag, payload))
-        elif tag == 4 and len(payload) == 3:  # Speaker Allocation Data Block
-            found_sadb = True
-            # 0x0F = FL/FR (bit0) | LFE (bit1) | FC (bit2) | RL/RR (bit3) = 5.1
-            payload[0] |= 0x0F
-            new_blocks.append((tag, payload))
-        else:
-            new_blocks.append((tag, payload))
-
-    if not found_audio:
-        audio_payload = bytearray(b"\x09\x07\x07" + SAD_AC3_51 + (SAD_DTS_51 if include_dts else b""))
-        new_blocks.append((1, audio_payload))
-    if not found_sadb:
-        new_blocks.append((4, bytearray(b"\x0f\x00\x00")))
-
-    # Reassemble CEA data block collection
-    dbc = bytearray()
-    for tag, payload in new_blocks:
-        dbc.append(((tag & 0x07) << 5) | (len(payload) & 0x1F))
-        dbc.extend(payload)
-
-    new_dtd_off = 4 + len(dbc)
-    growth = new_dtd_off - orig_dtd_off
-    if growth < 0:
-        raise ValueError("Unexpected negative block growth")
-
-    # Verify the trailing DTD padding has enough zero bytes to absorb the growth
-    # without truncating any active 18-byte Detailed Timing Descriptor.
-    if growth > 0 and any(b != 0 for b in dtd_tail[-growth:]):
-        raise ValueError(
-            f"Not enough trailing zero padding in CEA block ({growth} bytes needed) "
-            "to shift DTDs without losing a timing descriptor"
-        )
-
-    new_dtd_area = dtd_tail[: 127 - new_dtd_off]
-    new_ext = bytearray(128)
-    new_ext[0] = ext[0]
-    new_ext[1] = ext[1]
-    new_ext[2] = new_dtd_off
-    new_ext[3] = ext[3]
-    new_ext[4:new_dtd_off] = dbc
-    new_ext[new_dtd_off:127] = new_dtd_area
-    new_ext[127] = (-sum(new_ext[:127])) & 0xFF
-
-    out = base + bytes(new_ext)
-    assert len(out) == 256
-    assert checksum_ok(out[:128]) and checksum_ok(out[128:256])
-    return out
+        if tag == TAG_AUDIO:
+            present = {payload[i] >> 3 & 0x0F for i in range(0, len(payload), 3)}
+            payload += b"".join(sad for fmt, sad in AUDIO_FORMATS.items() if fmt not in present)
+        elif tag == TAG_SPEAKERS and len(payload) == 3:
+            payload = bytes([payload[0] | SPEAKERS_51]) + payload[1:]
+        if len(payload) > 31:
+            raise ValueError("a data block would exceed 31 bytes")
+        patched.append((tag, payload))
+    return patched
 
 
-def summarize(edid: bytes) -> str:
-    blocks, dtd_off, _ = parse_cea_blocks(edid[128:256])
-    adb = next((bytes([(1 << 5) | len(p)]) + bytes(p) for t, p in blocks if t == 1), b"")
-    sadb = next((bytes([(4 << 5) | len(p)]) + bytes(p) for t, p in blocks if t == 4), b"")
-    vsdb = next((p for t, p in blocks if t == 3 and len(p) >= 5 and p[:3] == b"\x03\x0c\x00"), None)
-    phys = (
-        f"{vsdb[3]>>4}.{vsdb[3]&0xf}.{vsdb[4]>>4}.{vsdb[4]&0xf}"
-        if vsdb is not None
-        else "?.?.?.?"
+def checked(edid: bytes) -> bytes:
+    if len(edid) != 256:
+        raise ValueError(f"expected 256 bytes, got {len(edid)}")
+    if edid[:8] != HEADER:
+        raise ValueError("no EDID header")
+    if sum(edid[:128]) % 256 or sum(edid[128:]) % 256:
+        raise ValueError("bad checksum")
+    return edid
+
+
+def patch(edid: bytes) -> bytes:
+    cea = checked(edid)[128:]
+    collection = b"".join(
+        bytes([tag << 5 | len(payload)]) + payload for tag, payload in with_surround(data_blocks(cea))
     )
-    return f"phys={phys} dtd_off={dtd_off} ADB={adb.hex()} SADB={sadb.hex()}"
+    body = cea[:2] + bytes([4 + len(collection)]) + cea[3:4] + collection + detailed_timings(cea)
+    if len(body) > 127:
+        raise ValueError(f"the extension block has no room for {len(body) - 127} more bytes")
+    body = body.ljust(127, b"\0")
+    return checked(edid[:128] + body + bytes([-sum(body) % 256]))
 
 
-def main():
+def summary(edid: bytes) -> str:
+    blocks = data_blocks(edid[128:])
+
+    def first(tag: int) -> str:
+        return next((bytes([tag << 5 | len(p)]) + p for t, p in blocks if t == tag), b"").hex() or "-"
+
+    hdmi = next((p for t, p in blocks if t == TAG_VENDOR and len(p) >= 5 and p[:3] == b"\x03\x0c\x00"), None)
+    phys = ".".join(f"{nibble:x}" for byte in hdmi[3:5] for nibble in divmod(byte, 16)) if hdmi else "-"
+    return f"phys={phys} ADB={first(TAG_AUDIO)} SADB={first(TAG_SPEAKERS)}"
+
+
+def main() -> int:
     if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <input_file_or_dir> <output_file_or_dir>", file=sys.stderr)
-        sys.exit(2)
+        print(__doc__, file=sys.stderr)
+        return 2
+    source, target = Path(sys.argv[1]), Path(sys.argv[2])
 
-    src, dst = sys.argv[1], sys.argv[2]
-    if os.path.isdir(src):
-        os.makedirs(dst, exist_ok=True)
-        files = sorted(f for f in os.listdir(src) if f.endswith(".bin"))
-        if not files:
-            print(f"No .bin files found in {src}", file=sys.stderr)
-            sys.exit(1)
-        for fn in files:
-            raw = open(os.path.join(src, fn), "rb").read()
-            patched = patch_edid(raw)
-            out_path = os.path.join(dst, fn)
-            open(out_path, "wb").write(patched)
-            print(f"{fn}:")
-            print(f"  in : {summarize(raw)}")
-            print(f"  out: {summarize(patched)}")
+    if source.is_dir():
+        target.mkdir(parents=True, exist_ok=True)
+        pairs = [(path, target / path.name) for path in sorted(source.glob("*.bin"))]
     else:
-        raw = open(src, "rb").read()
-        patched = patch_edid(raw)
-        open(dst, "wb").write(patched)
-        print(f"in : {summarize(raw)}")
-        print(f"out: {summarize(patched)}")
+        pairs = [(source, target)]
+    if not pairs:
+        print(f"no *.bin files in {source}", file=sys.stderr)
+        return 1
+
+    failed = False
+    for path, output in pairs:
+        try:
+            edid = path.read_bytes()
+            patched = patch(edid)
+        except (OSError, ValueError) as error:
+            print(f"{path}: {error}", file=sys.stderr)
+            failed = True
+            continue
+        output.write_bytes(patched)
+        print(f"{path.name}\n  in : {summary(edid)}\n  out: {summary(patched)}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

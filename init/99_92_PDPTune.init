@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# Loads libPDPTune into exeTV at boot. Its options are the words in
+# libPDPTune.conf next to the library ('#' starts a comment), or else the
+# default below; the README explains them. An empty file STOP or STOP_PDPTUNE
+# in the root of a USB stick skips it.
+#
+# shellcheck source=/dev/null
+. /dtv/SGO.env
+
+LIB="${LIBSO_DIR:-$SYSROOT/opt/privateer/usr/libso}/libPDPTune.so"
+CONF="${LIB%.so}.conf"
+LOG=/dtv/PDPTune.log
+OPTIONS="UNLOCK DRIVE:STANDARD"
+
+case $1 in
+	start)
+	for usb in /dtv/usb/sd*; do
+		if [ -e "$usb/STOP" ] || [ -e "$usb/STOP_PDPTUNE" ]; then
+			echo "STOP file found, picture left alone."
+			exit 0
+		fi
+	done
+	if [ -f "$LIB" ] && pidof exeTV > /dev/null; then
+		cr=$(printf '\r')
+		[ -f "$CONF" ] && OPTIONS=$(sed "s/#.*//; s/$cr//" "$CONF")
+		rm -f "$LOG"
+		# One argument per word.
+		# shellcheck disable=SC2086
+		samyGOso -T -B -r -l "$LIB" $OPTIONS
+	fi
+	;;
+	stop)
+	;;
+	status)
+	cat "$LOG" 2> /dev/null || echo "Not started"
+	;;
+	*)
+	echo "Usage: $0 {start|stop|status}" >&2
+	;;
+esac

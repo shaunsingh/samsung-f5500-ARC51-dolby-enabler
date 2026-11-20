@@ -33,15 +33,21 @@
             "    pop {r4, r5, r6, r7, fp, pc}\n"                                                                       \
             ".popsection\n")
 
-#define WRITE_I2C      "_ZN8LogicFHD16m_Logic_WriteI2CEtt"
-#define READ_I2C       "_ZN8LogicFHD15m_Logic_ReadI2CEtPt"
-#define PANEL_TEMP     "_ZN8LogicFHD20t_Logic_GetPanelTempEPi"
-#define SUPPORT_OPTION "_ZN14PrdInfoManager18CheckSupportOptionEN12IProductInfo22ProductSupportOption_kEPb"
+#define WRITE_I2C       "_ZN8LogicFHD16m_Logic_WriteI2CEtt"
+#define READ_I2C        "_ZN8LogicFHD15m_Logic_ReadI2CEtPt"
+#define PANEL_TEMP      "_ZN8LogicFHD20t_Logic_GetPanelTempEPi"
+#define SUPPORT_OPTION  "_ZN14PrdInfoManager18CheckSupportOptionEN12IProductInfo22ProductSupportOption_kEPb"
+#define SCREEN_INSTANCE "_ZN12SsScreenBase8InstanceEN9TPCScreen7EScreenE"
+#define GET_GAMMA_MODE  "_ZN12SsScreenBase12GetGammaModeEPN9TPCScreen10EGammaModeE"
+#define SET_GAMMA_MODE  "_ZN12SsScreenBase12SetGammaModeEN9TPCScreen10EGammaModeE"
 
 FIRMWARE_FUNCTION(".fw.write_i2c", WRITE_I2C, "body_write_i2c");
 FIRMWARE_FUNCTION(".fw.read_i2c", READ_I2C, "body_read_i2c");
 FIRMWARE_FUNCTION(".fw.panel_temp", PANEL_TEMP, "body_panel_temp");
 FIRMWARE_FUNCTION(".fw.support_option", SUPPORT_OPTION, "body_support_option");
+FIRMWARE_FUNCTION(".fw.screen_instance", SCREEN_INSTANCE, "body_screen_instance");
+FIRMWARE_FUNCTION(".fw.get_gamma_mode", GET_GAMMA_MODE, "body_get_gamma_mode");
+FIRMWARE_FUNCTION(".fw.set_gamma_mode", SET_GAMMA_MODE, "body_set_gamma_mode");
 
 /* MDrv_PNL_SetGammaTbl in libUTOPIA.so begins with push {r4..r8, sl, fp, lr} (0xe92d4df0). */
 __asm__(".text\n"
@@ -73,10 +79,58 @@ enum {
 };
 
 static struct { void *vptr; } g_logic = { &vtable_logic_fhd[2] };
-static _Atomic uint16_t      g_panel[0x10000];
-static pthread_mutex_t       g_bus = PTHREAD_MUTEX_INITIALIZER;
-static uint8_t               g_gamma_hw[3][386];
-static int                   g_gamma_calls;
+static int                    g_screen_dummy;
+static _Atomic int            g_osd_gamma = -1;
+static _Atomic uint16_t       g_panel[0x10000];
+static pthread_mutex_t        g_bus = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t                g_gamma_hw[3][386];
+static _Atomic int            g_gamma_calls;
+
+static void pack_ramp(uint8_t buf[386], uint16_t max_val)
+{
+    for (int k = 0; k < 128; k++) {
+        uint16_t v0 = (uint16_t)(((uint32_t)(2 * k) * max_val + 127) / 255);
+        uint16_t v1 = (uint16_t)(((uint32_t)(2 * k + 1) * max_val + 127) / 255);
+        buf[3 * k]     = (uint8_t)((v0 & 0x0fu) | ((v1 & 0x0fu) << 4));
+        buf[3 * k + 1] = (uint8_t)(v0 >> 4);
+        buf[3 * k + 2] = (uint8_t)(v1 >> 4);
+    }
+    /* Deliberately leave bytes 384..385 garbage, like Samsung's SdDisplay_SetPictureQuality. */
+    buf[384] = 0xaa;
+    buf[385] = 0x55;
+}
+
+void *body_screen_instance(int screen)
+{
+    return screen == 0 ? &g_screen_dummy : NULL;
+}
+
+int body_get_gamma_mode(void *screen, int *mode)
+{
+    if (screen != &g_screen_dummy)
+        abort();
+    *mode = g_osd_gamma;
+    return 0;
+}
+
+int body_set_gamma_mode(void *screen, int mode)
+{
+    static int cached_mode = -1;
+    if (screen != &g_screen_dummy || mode < -3 || mode > 3)
+        return 1;
+    g_osd_gamma = mode;
+    /* Real PrimePictureShare skips MDrv_PNL_SetGammaTbl when the gamma index matches its RAM cache. */
+    if (mode == cached_mode)
+        return 0;
+    cached_mode = mode;
+    uint8_t  r[386], g[386], b[386];
+    uint8_t *ptrs[3] = { r, g, b };
+    pack_ramp(r, 4095);
+    pack_ramp(g, 3900);
+    pack_ramp(b, 3500);
+    MDrv_PNL_SetGammaTbl(1, ptrs, 1);
+    return 0;
+}
 
 uint8_t body_set_gamma(int lut_type, uint8_t **gamma_tab, int map_mode)
 {
@@ -234,18 +288,13 @@ static uint16_t gamma_entry(const uint8_t *buf, int idx)
                      : (uint16_t)((s[0] & 0x0fu) | ((uint16_t)s[1] << 4));
 }
 
-static void pack_ramp(uint8_t buf[386], uint16_t max_val)
+static bool unlocked_all(void)
 {
-    for (int k = 0; k < 128; k++) {
-        uint16_t v0 = (uint16_t)(((uint32_t)(2 * k) * max_val + 127) / 255);
-        uint16_t v1 = (uint16_t)(((uint32_t)(2 * k + 1) * max_val + 127) / 255);
-        buf[3 * k]     = (uint8_t)((v0 & 0x0fu) | ((v1 & 0x0fu) << 4));
-        buf[3 * k + 1] = (uint8_t)(v0 >> 4);
-        buf[3 * k + 2] = (uint8_t)(v1 >> 4);
-    }
-    /* Deliberately leave bytes 384..385 garbage, like Samsung's SdDisplay_SetPictureQuality. */
-    buf[384] = 0xaa;
-    buf[385] = 0x55;
+    bool p = false, wb = false, cs = false;
+    CHECK(fw_support_option(NULL, 0x49, &p) == 1);
+    CHECK(fw_support_option(NULL, 0x4a, &wb) == 1);
+    CHECK(fw_support_option(NULL, 0x51, &cs) == 1);
+    return p && wb && cs;
 }
 
 static bool wb10p(void)
@@ -316,7 +365,7 @@ static void test_pdptune(const char *libpath)
     puts("UNLOCK DRIVE:STANDARD");
     inject("UNLOCK DRIVE:STANDARD");
     EVENTUALLY(g_panel[DRIVE] == 0x11 && hooked(fw_support_option));
-    CHECK(hooked(fw_write_i2c) && wb10p());
+    CHECK(hooked(fw_write_i2c) && wb10p() && unlocked_all());
     bool supported = true;
     CHECK(fw_support_option(NULL, 2, &supported) == 1 && !supported);
     CHECK(g_panel[DUTY2] == 0x80 && g_panel[SUB_CONTRAST] == 0x0800 && g_panel[DEEP_BLACK] == 0);
@@ -366,17 +415,16 @@ static void test_pdptune(const char *libpath)
     CHECK(g_panel[DRIVE] == 0x05 && g_panel[DEEP_BLACK] == 0 && g_panel[PEAK_STRETCH] == 1);
     CHECK(g_panel[DUTY2] == 0x80 && g_panel[SUB_CONTRAST] == 0x0800 && !hooked(fw_support_option));
 
-    puts("opt-in 12-bit gamma LUT composes onto firmware table and restores on OFF");
-    CHECK(!gamma_hooked());
-    inject("GAMMA:BT1886");
-    EVENTUALLY(gamma_hooked());
+    puts("opt-in 12-bit gamma LUT auto-syncs on boot, composes onto firmware table, and restores on OFF");
+    CHECK(!gamma_hooked() && g_osd_gamma == -1);
     uint8_t stock_r[386], stock_g[386], stock_b[386];
     pack_ramp(stock_r, 4095);
     pack_ramp(stock_g, 3900); /* Warm2-style channel scaling must be preserved at peak */
     pack_ramp(stock_b, 3500);
-    uint8_t *stock_ptrs[3] = { stock_r, stock_g, stock_b };
-    int      before = g_gamma_calls;
-    CHECK(MDrv_PNL_SetGammaTbl(1, stock_ptrs, 1) == 1 && g_gamma_calls == before + 1);
+    int before = g_gamma_calls;
+    inject("OSD_GAMMA:0 GAMMA:BT1886 DUMP");
+    EVENTUALLY(gamma_hooked() && g_gamma_calls == before + 1);
+    CHECK(g_osd_gamma == 0);
     CHECK(gamma_entry(g_gamma_hw[0], 0) == 0 && gamma_entry(g_gamma_hw[0], 255) == 4095);
     CHECK(gamma_entry(g_gamma_hw[1], 255) == 3900 && gamma_entry(g_gamma_hw[2], 255) == 3500);
     CHECK(gamma_entry(g_gamma_hw[0], 256) == 4095 && gamma_entry(g_gamma_hw[1], 256) == 3900);
@@ -384,7 +432,7 @@ static void test_pdptune(const char *libpath)
     CHECK(gamma_entry(g_gamma_hw[0], 5) > gamma_entry(stock_r, 5));
     CHECK(gamma_entry(g_gamma_hw[0], 128) < gamma_entry(stock_r, 128));
 
-    /* Live switch to GAMMA:2.4 immediately re-applies to the captured stock LUT. */
+    /* Live switch to GAMMA:2.4 immediately re-applies to the captured stock LUT without touching OSD Gamma. */
     before = g_gamma_calls;
     inject("GAMMA:2.4");
     EVENTUALLY(g_gamma_calls == before + 1);
@@ -398,6 +446,14 @@ static void test_pdptune(const char *libpath)
     CHECK(g_gamma_calls == before + 1);
     CHECK(memcmp(g_gamma_hw[0], stock_r, 384) == 0 && memcmp(g_gamma_hw[1], stock_g, 384) == 0);
     CHECK(gamma_entry(g_gamma_hw[2], 256) == 3500);
+
+    /* Re-enabling GAMMA:BT1886 when OSD Gamma is ALREADY 0 still busts the RAM cache in one HW write. */
+    before = g_gamma_calls;
+    inject("OSD_GAMMA:0 GAMMA:BT1886");
+    EVENTUALLY(gamma_hooked() && g_gamma_calls == before + 1);
+    CHECK(g_osd_gamma == 0 && gamma_entry(g_gamma_hw[0], 5) > gamma_entry(stock_r, 5));
+    inject("OFF");
+    EVENTUALLY(!gamma_hooked());
 
     puts("hooks come and go under load");
     pthread_t threads[3];

@@ -5,7 +5,8 @@
  * other build alone. The words of one injection are the whole configuration,
  * and what is not named goes back to stock:
  *
- *   UNLOCK                  offer 10p White Balance in the picture menu
+ *   UNLOCK                  offer 10p White Balance, Color Space -> Custom
+ *                           (6-axis CMS) and Expert Pattern in the menu
  *   DRIVE:STANDARD          drive Movie and Relax with the waveform the
  *                           firmware uses for Dynamic, Standard and Natural
  *   DEEPBLACK:ON|OFF        hold the logic board's DeepBlack on or off
@@ -14,7 +15,8 @@
  *                           above 128 apply only when APC_OFFSET is 0)
  *   SUBCONTRAST:<100..160>  replace Sub Contrast (factory: 128 Movie, 132 Std)
  *   GAMMA:TOE|2.3|2.4|BT1886  compose a 12-bit EOTF curve onto exeTV's gamma
- *                           LUT in MDrv_PNL_SetGammaTbl (opt-in)
+ *                           LUT in MDrv_PNL_SetGammaTbl (opt-in, auto-synced)
+ *   OSD_GAMMA:<-3..3>       set exeTV's OSD Gamma slider (e.g. 0 for neutral)
  *   OFF                     nothing: stock registers, hooks removed
  *   DUMP                    log the registers involved; changes nothing
  *
@@ -32,7 +34,7 @@
 #include "gamma_tables.h"
 #include "samygo.h"
 
-#define VERSION  "2.1.0"
+#define VERSION  "2.2.0"
 #define LOG      "/dtv/PDPTune.log"
 #define say(...) sgo_log(LOG, __VA_ARGS__)
 
@@ -40,7 +42,18 @@
  * exeTV is not position independent, so a build is identified by where its
  * symbols are. Every address and constant below was read out of this build.
  */
-enum { F_WRITE_I2C, F_READ_I2C, F_PANEL_TEMP, F_SUPPORT_OPTION, F_LOGIC_IC, F_LOGIC_FHD_VTABLE, F_COUNT };
+enum {
+    F_WRITE_I2C,
+    F_READ_I2C,
+    F_PANEL_TEMP,
+    F_SUPPORT_OPTION,
+    F_SCREEN_INSTANCE,
+    F_GET_GAMMA_MODE,
+    F_SET_GAMMA_MODE,
+    F_LOGIC_IC,
+    F_LOGIC_FHD_VTABLE,
+    F_COUNT
+};
 
 static const struct {
     const char *symbol;
@@ -51,6 +64,9 @@ static const struct {
     [F_PANEL_TEMP]       = { "_ZN8LogicFHD20t_Logic_GetPanelTempEPi", 0x006ec3e0 },
     [F_SUPPORT_OPTION]   = { "_ZN14PrdInfoManager18CheckSupportOptionEN12IProductInfo22ProductSupportOption_kEPb",
                              0x00637550 },
+    [F_SCREEN_INSTANCE]  = { "_ZN12SsScreenBase8InstanceEN9TPCScreen7EScreenE", 0x0082429c },
+    [F_GET_GAMMA_MODE]   = { "_ZN12SsScreenBase12GetGammaModeEPN9TPCScreen10EGammaModeE", 0x00813b08 },
+    [F_SET_GAMMA_MODE]   = { "_ZN12SsScreenBase12SetGammaModeEN9TPCScreen10EGammaModeE", 0x00813c00 },
     [F_LOGIC_IC]         = { "_ZN8TDcLogic11m_poLogicICE", 0x01f44b34 },
     [F_LOGIC_FHD_VTABLE] = { "_ZTV8LogicFHD", 0x018aea00 },
 };
@@ -59,11 +75,17 @@ typedef int     write_i2c_fn(void *logic, uint16_t reg, uint16_t value);
 typedef int     read_i2c_fn(void *logic, uint16_t reg, uint16_t *value);
 typedef int     panel_temp_fn(void *logic, int *celsius);
 typedef int     support_option_fn(void *self, int option, bool *supported);
+typedef void   *screen_instance_fn(int screen);
+typedef int     get_gamma_mode_fn(void *screen, int *mode);
+typedef int     set_gamma_mode_fn(void *screen, int mode);
 typedef uint8_t set_gamma_fn(int lut_type, uint8_t **gamma_tab, int map_mode);
 
-#define EXETV_BASE    0x8000u /* lowest address of the exeTV image */
-#define OPTION_WB_10P 0x4a    /* IProductInfo::ProductSupportOption_k */
-#define REG_APC_OFFSET 0x89c0 /* (1024 - duty) >> 1; 0 at full Cell Light 20 */
+#define EXETV_BASE            0x8000u /* lowest address of the exeTV image */
+#define OPTION_EXPERT_PATTERN 0x49    /* IProductInfo::ProductSupportOption_k: Expert Pattern */
+#define OPTION_WB_10P         0x4a    /* IProductInfo::ProductSupportOption_k: 10p White Balance */
+#define OPTION_CS_CUSTOM      0x51    /* IProductInfo::ProductSupportOption_k: Color Space Custom */
+#define REG_APC_OFFSET        0x89c0  /* (1024 - duty) >> 1; 0 at full Cell Light 20 */
+#define OSD_GAMMA_KEEP        99      /* sentinel: leave OSD Gamma slider untouched */
 
 static bool firmware_matches(void)
 {
@@ -360,7 +382,7 @@ static int on_write_i2c(void *logic, uint16_t reg, uint16_t value)
 
 static int on_support_option(void *self, int option, bool *supported)
 {
-    if (option == OPTION_WB_10P) {
+    if (option == OPTION_EXPERT_PATTERN || option == OPTION_WB_10P || option == OPTION_CS_CUSTOM) {
         if (supported)
             *supported = true;
         return 1;
@@ -381,6 +403,7 @@ static int on_support_option(void *self, int option, bool *supported)
 
 static int     g_gamma_mode = GAMMA_NONE;
 static bool    g_gamma_have_stock;
+static bool    g_gamma_skip_once;
 static int     g_gamma_lut_type = 1;
 static uint8_t g_gamma_stock[3][GAMMA_PACKED_STOCK];
 static uint8_t g_gamma_out[3][GAMMA_PACKED_OUT];
@@ -462,6 +485,11 @@ static uint8_t on_set_gamma(int lut_type, uint8_t **gamma_tab, int map_mode)
         pthread_mutex_unlock(&g_lock);
         return set_gamma_orig(lut_type, gamma_tab, map_mode);
     }
+    if (g_gamma_skip_once) {
+        g_gamma_skip_once = false;
+        pthread_mutex_unlock(&g_lock);
+        return 1;
+    }
     g_gamma_lut_type = lut_type;
     for (int ch = 0; ch < 3; ch++)
         memcpy(g_gamma_stock[ch], gamma_tab[ch], GAMMA_PACKED_STOCK);
@@ -524,8 +552,59 @@ struct request {
     bool dump;
     bool unlock;
     int  gamma;
+    int  osd_gamma;
     int  to[K_COUNT];
 };
+
+/*
+ * Asks SsScreenBase to apply OSD Gamma (either a requested value or the saved
+ * one), which makes exeTV push its real 12-bit R/G/B LUT (including Warm2 and
+ * 2p/10p WB) through MDrv_PNL_SetGammaTbl. PrimePictureShare caches the last
+ * gamma index in RAM and skips SetGammaTbl when unchanged, so if the LUT was
+ * not captured we step the index once (dropping the dummy LUT in on_set_gamma
+ * to avoid panel flicker) and immediately restore target. Must run WITHOUT
+ * g_lock held.
+ */
+static void sync_firmware_gamma(int osd_gamma)
+{
+    screen_instance_fn *screen_instance = (screen_instance_fn *)g_firmware[F_SCREEN_INSTANCE].addr;
+    get_gamma_mode_fn  *get_gamma_mode = (get_gamma_mode_fn *)g_firmware[F_GET_GAMMA_MODE].addr;
+    set_gamma_mode_fn  *set_gamma_mode = (set_gamma_mode_fn *)g_firmware[F_SET_GAMMA_MODE].addr;
+
+    void *screen = NULL;
+    for (int tenths = 0; !(screen = screen_instance(0)) && tenths < 100; tenths++)
+        usleep(100000);
+    if (!screen) {
+        say("SsScreenBase(0) not available");
+        return;
+    }
+
+    int current = 0;
+    if (get_gamma_mode(screen, &current) != 0) {
+        say("cannot read OSD Gamma");
+        return;
+    }
+    int target = osd_gamma == OSD_GAMMA_KEEP ? current : osd_gamma;
+    if (current != target && set_gamma_mode(screen, target) != 0) {
+        say("cannot set OSD Gamma to %d", target);
+        return;
+    }
+
+    pthread_mutex_lock(&g_lock);
+    bool need_bust = g_hooks[H_SET_GAMMA].installed && !g_gamma_have_stock;
+    if (need_bust)
+        g_gamma_skip_once = true;
+    pthread_mutex_unlock(&g_lock);
+
+    if (need_bust) {
+        set_gamma_mode(screen, target == 0 ? 1 : 0);
+        pthread_mutex_lock(&g_lock);
+        g_gamma_skip_once = false;
+        pthread_mutex_unlock(&g_lock);
+        set_gamma_mode(screen, target);
+    }
+    say("OSD Gamma synced at %d", target);
+}
 
 /*
  * A write that entered m_Logic_WriteI2C just before it was hooked is not seen
@@ -534,7 +613,8 @@ struct request {
  */
 #define HOOK_SETTLE_US 100000
 
-static void configure(const struct request *request, void *logic)
+/* Returns true if the caller must trigger a firmware gamma reload outside g_lock. */
+static bool configure(const struct request *request, void *logic)
 {
     struct hook *hook = &g_hooks[H_WRITE_I2C];
     bool         tune = false;
@@ -557,25 +637,27 @@ static void configure(const struct request *request, void *logic)
 
     hook_set(&g_hooks[H_SUPPORT_OPTION], request->unlock);
 
+    bool         need_reload = request->osd_gamma != OSD_GAMMA_KEEP;
     struct hook *ghook = &g_hooks[H_SET_GAMMA];
     g_gamma_mode = request->gamma;
     if (g_gamma_mode != GAMMA_NONE) {
         if (hook_set(ghook, true)) {
-            if (g_gamma_have_stock) {
+            if (g_gamma_have_stock && !need_reload) {
                 apply_gamma_locked();
                 say("gamma %s applied to firmware LUT", g_gamma_names[g_gamma_mode]);
             } else {
-                say("gamma %s armed (applies on next firmware gamma load)", g_gamma_names[g_gamma_mode]);
+                need_reload = true;
             }
         }
     } else if (ghook->installed) {
-        if (g_gamma_have_stock) {
+        if (g_gamma_have_stock && !need_reload) {
             apply_gamma_locked();
             say("gamma restored to firmware LUT");
         }
         hook_set(ghook, false);
         g_gamma_have_stock = false;
     }
+    return need_reload;
 }
 
 static void dump_register(void *logic, const char *name, uint16_t reg)
@@ -601,6 +683,11 @@ static void dump(void *logic)
     dump_register(logic, "APC offset", 0x89c0);
     dump_register(logic, "SubBright", 0x8926);
 
+    void *screen = ((screen_instance_fn *)g_firmware[F_SCREEN_INSTANCE].addr)(0);
+    int   osd_gamma;
+    if (screen && ((get_gamma_mode_fn *)g_firmware[F_GET_GAMMA_MODE].addr)(screen, &osd_gamma) == 0)
+        say("dump OSD Gamma %d", osd_gamma);
+
     int celsius;
     if (((panel_temp_fn *)g_firmware[F_PANEL_TEMP].addr)(logic, &celsius) == 0)
         say("dump panel temperature %d C", celsius);
@@ -621,8 +708,15 @@ static void *worker(void *arg)
         firmware = firmware_matches() ? SUPPORTED : UNSUPPORTED;
     if (firmware == SUPPORTED) {
         void *logic = logic_board();
-        if (request->configure)
-            configure(request, logic);
+        bool  need_reload = request->configure ? configure(request, logic) : false;
+        if (need_reload) {
+            int osd_gamma = request->osd_gamma;
+            pthread_mutex_unlock(&g_lock);
+            sync_firmware_gamma(osd_gamma);
+            pthread_mutex_lock(&g_lock);
+            if (g_gamma_mode != GAMMA_NONE && g_gamma_have_stock)
+                say("gamma %s applied to firmware LUT", g_gamma_names[g_gamma_mode]);
+        }
         if (request->dump)
             dump(logic);
     }
@@ -661,6 +755,21 @@ static bool parse_number(const char *text, int low, int high, int *out)
             return false;
         value = value * 10 + (*text - '0');
     }
+    if (value < low || value > high)
+        return false;
+    *out = value;
+    return true;
+}
+
+static bool parse_signed_number(const char *text, int low, int high, int *out)
+{
+    bool neg = *text == '-';
+    if (neg || *text == '+')
+        text++;
+    int mag;
+    if (!parse_number(text, 0, high > -low ? high : -low, &mag))
+        return false;
+    int value = neg ? -mag : mag;
     if (value < low || value > high)
         return false;
     *out = value;
@@ -710,6 +819,8 @@ static bool parse_word(const char *word, struct request *request)
         }
         return false;
     }
+    if ((value = value_of(word, "OSD_GAMMA")))
+        return parse_signed_number(value, -3, 3, &request->osd_gamma);
     return false;
 }
 
@@ -719,7 +830,7 @@ void lib_init(void *handle, const char *libpath)
 {
     (void)handle;
 
-    struct request request = { .to = { KEEP, KEEP, KEEP, KEEP, KEEP } };
+    struct request request = { .osd_gamma = OSD_GAMMA_KEEP, .to = { KEEP, KEEP, KEEP, KEEP, KEEP } };
     const char    *argv[MAX_WORDS];
     int            argc = sgo_args(libpath, argv, MAX_WORDS);
     char           words[160] = "";

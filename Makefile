@@ -34,6 +34,7 @@ IMPORTS := __errno_location __isoc99_fscanf close dlclose dlopen dlsym fclose fo
 
 # Where the firmware has what libPDPTune looks up; see g_firmware there.
 FIRMWARE := write_i2c=0x006ece6c read_i2c=0x006ec0d4 panel_temp=0x006ec3e0 support_option=0x00637550 \
+            screen_instance=0x0082429c get_gamma_mode=0x00813b08 set_gamma_mode=0x00813c00 \
             logic_ic=0x01f44b34 logic_fhd_vtable=0x018aea00
 
 all: $(LIBS)

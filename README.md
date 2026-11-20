@@ -5,7 +5,7 @@ Two [SamyGO](https://forum.samygo.tv/) payloads for 2013 Samsung F-series TVs wi
 | | What it does | Works on |
 |---|---|---|
 | **`libDDCRAM_EDID`** | Makes HDMI sources (Xbox, Apple TV, Shield, Blu-ray players) send **Dolby Digital 5.1** and **DTS 5.1**, which the TV then passes to an **HDMI-ARC** or optical soundbar or receiver. No EDID emulator or audio extractor is needed. | F-series `T-MST12` firmware that exports the MStar functions named below |
-| **`libPDPTune`** | Picture options for the plasma panel: the hidden **10p White Balance** menu, and control over a few registers of the panel's logic board. | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`; it leaves any other firmware alone |
+| **`libPDPTune`** | Picture options for the plasma panel: unlocks hidden calibration menus (**10p White Balance**, **Color Space → Custom** 6-axis CMS, **Expert Pattern**), overrides plasma logic-board registers, and optionally composes a 12-bit EOTF curve (`BT1886`, `2.4`, `2.3`, `TOE`) onto `exeTV`'s gamma LUT. | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`; it leaves any other firmware alone |
 
 Both are injected into the running `exeTV` process by `samyGOso` from a SamyGO USB stick. **Nothing is written to the TV's flash**: without the stick the TV is stock.
 
@@ -111,21 +111,22 @@ Other lines the log can show: `LOAD-ALREADY-OK` (nothing to do), `LOAD-MISMATCH`
 
 ## Picture: `libPDPTune`
 
-`libPDPTune` first checks that six symbols of `exeTV` are at the addresses they have in `T-MST12AKUC-2225.0` and that the panel's logic board is driven by the firmware's `LogicFHD` class. If not, it logs that and does nothing.
+`libPDPTune` first checks that nine symbols of `exeTV` are at the addresses they have in `T-MST12AKUC-2225.0` and that the panel's logic board is driven by the firmware's `LogicFHD` class. If not, it logs that and does nothing.
 
 The words of one injection are the whole configuration. What is not named goes back to stock, so the configuration can be changed while the TV runs.
 
 | Word | Effect |
 |---|---|
-| `UNLOCK` | Offers **10p White Balance** under *Picture → Advanced Settings* in Movie mode. The firmware has the feature and hides it on this model: `PrdInfoManager::CheckSupportOption(0x4a)` answers no. |
+| `UNLOCK` | Unlocks three calibration features that `PrdInfoManager::CheckSupportOption` hides on this model: **10p White Balance** (`0x4a`), **Color Space → Custom** 6-axis RGBCMY gamut CMS (`0x51`), and **Expert Pattern** (`0x49`). |
 | `DRIVE:STANDARD` | In 2D, the firmware gives the logic board driving mode `0x05` for the Movie and Relax picture modes and `0x11` for Dynamic, Standard and Natural (register `0x806f`). This sends `0x11` wherever the firmware asks for `0x05`. Nothing else about Movie mode changes. |
 | `DEEPBLACK:ON` / `OFF` | Holds the logic board's DeepBlack register (`0x809c`) at `3` or at `0`. |
 | `PEAKSTRETCH:ON` / `OFF` | Holds its PeakStretch register (`0x8063`) at `1` or at `0`. |
 | `DUTY2:<79..160>` | Replaces the constant `128` this panel gets in register `0x89da` whenever it is lit. Boosts above `128` apply only while `APC_OFFSET` (`0x89c0`) is `0` (full Cell Light 20 with no Eco or thermal dimming). |
 | `SUBCONTRAST:<100..160>` | Replaces *Sub Contrast* (register `0x8927` holds the service-menu value times 16). Factory values on this set: `128` in Movie (`MSub Contrast`), `132` in Dynamic/Standard/Natural (`Sub Contrast`). |
-| `GAMMA:TOE` / `2.3` / `2.4` / `BT1886` | Opt-in 12-bit hardware EOTF curve composed onto `exeTV`'s R/G/B gamma LUT inside `MDrv_PNL_SetGammaTbl` (`libUTOPIA.so`). Preserves Warm2 and 2p/10p White Balance, keeps black at `0` and peak unclipped, and initializes the 257th guard entry (`entry[256] = entry[255]`) that `SdDisplay_SetPictureQuality` leaves unset. Not hooked unless requested. |
+| `GAMMA:TOE` / `2.3` / `2.4` / `BT1886` | Opt-in 12-bit hardware EOTF curve composed onto `exeTV`'s R/G/B gamma LUT inside `MDrv_PNL_SetGammaTbl` (`libUTOPIA.so`). Automatically syncs on boot via `SsScreenBase::SetGammaMode`, preserves Warm2 and 2p/10p White Balance, keeps black at `0` and peak unclipped, and initializes the 257th guard entry (`entry[256] = entry[255]`) that `SdDisplay_SetPictureQuality` leaves unset. Not hooked unless requested. |
+| `OSD_GAMMA:<-3..3>` | Sets `exeTV`'s OSD *Gamma* slider (for example `OSD_GAMMA:0` so `GAMMA:BT1886` builds on the neutral `0` baseline rather than an offset OSD setting). |
 | `OFF` | Nothing: the registers and gamma LUT get the firmware's values back and all hooks are removed. |
-| `DUMP` | Logs the hook states, gamma state, registers involved and panel temperature. Changes nothing and can be combined with the others. |
+| `DUMP` | Logs the hook states, gamma state, OSD Gamma, registers involved and panel temperature. Changes nothing and can be combined with the others. |
 
 The boot script's default is `UNLOCK DRIVE:STANDARD`.
 
@@ -134,7 +135,7 @@ The boot script's default is `UNLOCK DRIVE:STANDARD`.
 - The firmware's *Black Optimizer* code writes DeepBlack and PeakStretch as a pair: `0` and `0` for Off, `3` and `0` for Dark Room, `0` and `1` for Bright Room. On the test set, though, the logic board comes up with DeepBlack `3` and PeakStretch `1` at every start and the firmware leaves them there (`BLACK_OPTIMIZER = 3` in NVRAM skips writing either register). `ON` is therefore what this set already does, and `OFF` is the experiment.
 - `128` is the highest `duty_2` the firmware sends to any panel type; higher values are outside what Samsung shipped, so boosts above `128` are automatically held back whenever `APC_OFFSET` (`0x89c0`) is non-zero.
 - `SUBCONTRAST:132` matches the factory *Sub Contrast* Samsung ships for Standard mode on this panel (`132` vs `128` in Movie mode). Values above `132` are outside what Samsung shipped.
-- `GAMMA:*` hooks `MDrv_PNL_SetGammaTbl` (called by `PrimePictureShare::m_PrimePicture_SetGamma` / `SetGamma10PWB` via `SdDisplay_SetPictureQuality` -> `g_IPanel->SetGammaTbl` -> `MDrv_PNL_SetGammaTbl(1, ptrs, 1)` -> `Hal_PNL_Set12BitGammaPerChannel`). `BT1886` targets ITU-R BT.1886 for a 5000:1 plasma (lifting 1–5% out of the plasma black floor while tracking 2.4 above); `TOE` deepens only 0–20% IRE without touching midtones or peak white. Because it composes onto `exeTV`'s real table rather than synthesizing a ramp, enabling `GAMMA:*` after boot takes effect on the next firmware gamma load (e.g. toggling Gamma or Picture Mode once, or switching inputs); subsequent switches between presets or `OFF` apply immediately.
+- `GAMMA:*` hooks `MDrv_PNL_SetGammaTbl` (called by `PrimePictureShare::m_PrimePicture_SetGamma` / `SetGamma10PWB` via `SdDisplay_SetPictureQuality` -> `g_IPanel->SetGammaTbl` -> `MDrv_PNL_SetGammaTbl(1, ptrs, 1)` -> `Hal_PNL_Set12BitGammaPerChannel`). `BT1886` targets ITU-R BT.1886 for a 5000:1 plasma (lifting 1–5% out of the plasma black floor while tracking 2.4 above); `TOE` deepens only 0–20% IRE without touching midtones or peak white. On cold boot or first activation, `libPDPTune` asks `SsScreenBase::SetGammaMode` to replay `exeTV`'s real 12-bit LUT so the curve applies immediately without a menu toggle.
 
 Treat `DEEPBLACK`, `PEAKSTRETCH`, `DUTY2`, `SUBCONTRAST` and `GAMMA` as experiments: change one at a time, compare by eye or with a meter, and keep what holds up. More light means more power, heat and wear on a plasma panel. None of this outlasts a restart of the TV.
 
@@ -161,7 +162,7 @@ cat /dtv/PDPTune.log
 ```
 
 ```text
-libPDPTune 2.1.0: UNLOCK DRIVE:STANDARD SUBCONTRAST:132 DUMP
+libPDPTune 2.2.0: UNLOCK DRIVE:STANDARD SUBCONTRAST:132 OSD_GAMMA:0 GAMMA:BT1886 DUMP
 LogicFHD::m_Logic_WriteI2C hooked
 DrivingMode 0x806f: firmware 0x0005, panel 0x0011
 DeepBlack   0x809c: firmware 0x0003, panel 0x0003
@@ -169,10 +170,13 @@ PeakStretch 0x8063: firmware 0x0001, panel 0x0001
 duty_2      0x89da: firmware 0x0080, panel 0x0080
 SubContrast 0x8927: firmware 0x0800, panel 0x0840
 PrdInfoManager::CheckSupportOption hooked
+MDrv_PNL_SetGammaTbl hooked
+OSD Gamma synced at 0
+gamma BT1886 applied to firmware LUT
 dump LogicFHD::m_Logic_WriteI2C is hooked
 dump PrdInfoManager::CheckSupportOption is hooked
-dump MDrv_PNL_SetGammaTbl is not hooked
-dump gamma mode NONE (stock LUT not captured)
+dump MDrv_PNL_SetGammaTbl is hooked
+dump gamma mode BT1886 (stock LUT captured)
 dump DrivingMode 0x806f = 0x0111
 dump DeepBlack   0x809c = 0x0003
 dump PeakStretch 0x8063 = 0x0001
@@ -180,6 +184,7 @@ dump duty_2      0x89da = 0x0080
 dump SubContrast 0x8927 = 0x0840
 dump APC offset  0x89c0 = 0x0000
 dump SubBright   0x8926 = 0x0450
+dump OSD Gamma 0
 dump panel temperature 46 C
 done
 ```

@@ -101,7 +101,7 @@ cat /dtv/DDCRAM_EDID.log
 [HPD] port=3 pulsed
 ```
 
-The source now offers Dolby Digital and DTS (Xbox: *Settings → General → Volume & audio output → HDMI audio*). On the TV, set *Sound → Additional Settings → SPDIF Output → Audio Format* to the bitstream format.
+The source now offers Dolby Digital and DTS (Xbox: *Settings → General → Volume & audio output → HDMI audio*). With `libHDMIpassthru` started as `AUTO PCM DTS`, switching to an HDMI input automatically engages bitstream passthrough. In the TV's *Sound → Speaker Settings / Additional Settings → SPDIF Output → Audio Format* menu, `DTS` mode unlocks every option (`PCM`, `Dolby Digital`, `DTS`, `DTS Neo 2:5`) so clicking one switches the hardware audio router immediately, even though Samsung's OSD summary text (`ExternalOutControl::GetAudioMode`) still displays `PCM` on HDMI whenever the incoming stream is stereo PCM or DTS.
 
 Other lines the log can show: `LOAD-ALREADY-OK` (nothing to do), `LOAD-MISMATCH` (the read-back differs), `LOAD-SKIP` (the file is missing or not a valid EDID).
 

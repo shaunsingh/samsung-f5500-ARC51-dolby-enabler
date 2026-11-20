@@ -1,236 +1,220 @@
-# samsung-f5500-ARC51-dolby-enabler
+# Samsung F5500 ARC 5.1 and plasma tuning
 
-Two [SamyGO](https://forum.samygo.tv/) payloads for 2013 Samsung F-series TVs with the MStar chipset (`T-MST12`), developed on a **PN60F5500AF** plasma running firmware `T-MST12AKUC-2225.0`:
+[SamyGO](https://forum.samygo.tv/) payloads for a 2013 Samsung F-series plasma, developed on a **PN60F5500AF** running firmware **T-MST12AKUC-2225.0**. Both are injected into the running `exeTV` process from a SamyGO USB stick. Nothing is written to the TV's flash: without the stick, the TV is stock.
 
-| | What it does | Works on |
+| Component | What it does | Works on |
 |---|---|---|
-| **`libDDCRAM_EDID`** | Makes HDMI sources (Xbox, Apple TV, Shield, Blu-ray players) send **Dolby Digital 5.1** and **DTS 5.1**, which the TV then passes to an **HDMI-ARC** or optical soundbar or receiver. No EDID emulator or audio extractor is needed. | F-series `T-MST12` firmware that exports the MStar functions named below |
-| **`libPDPTune`** | Picture options for the plasma panel: unlocks hidden calibration menus (**10p White Balance**, **Color Space → Custom** 6-axis CMS, **Expert Pattern**), overrides plasma logic-board registers, and optionally composes a 12-bit EOTF curve (`BT1886`, `2.4`, `2.3`, `TOE`) onto `exeTV`'s gamma LUT. | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`; it leaves any other firmware alone |
+| **`libDDCRAM_EDID`** | Makes HDMI sources offer **Dolby Digital 5.1** and **DTS 5.1**, which the TV passes to an HDMI-ARC or optical receiver. No EDID emulator or audio extractor is required. | F-series `T-MST12` firmware that exports the MStar functions in [the firmware notes](docs/firmware-reference.md) |
+| **`libPDPTune`** | Unlocks **10-point White Balance**, **Color Space → Custom**, and **Expert Pattern**, and can override plasma drive, Deep Black, Peak Stretch, duty, Sub Contrast, and the 12-bit gamma curve (`BT1886`, `2.4`, `2.3`, `TOE`). | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`. Any other firmware is left alone. |
 
-Both are injected into the running `exeTV` process by `samyGOso` from a SamyGO USB stick. **Nothing is written to the TV's flash**: without the stick the TV is stock.
+## Repository layout
 
 ```text
 src/       libDDCRAM_EDID.c, libPDPTune.c, gamma_tables.h, samygo.h
-init/      boot scripts for the stick
-scripts/   patch_edid_51.py, which adds 5.1 audio to dumped EDIDs
-test/      a stand-in exeTV that the libraries are tested against under qemu
-prebuilt/  the two libraries, built from this tree
+init/      01_02_telnet.init, 99_91_DDCRAM_EDID.init, 99_92_PDPTune.init, run1.sh
+scripts/   patch_edid_51.py, gamma_curves.py
+test/      fake_exetv.c, the QEMU stand-in for exeTV
+prebuilt/  libDDCRAM_EDID.so, libPDPTune.so
+docs/      firmware-reference.md, validation.md
 ```
 
----
+## Reference
 
-## 5.1 audio over HDMI-ARC
+Longer notes live in [`docs/`](docs/), not in this file:
 
-### Why the stock TV and `libFakeEDID` do not get there
+- [Firmware, registers, gamma, and the color model](docs/firmware-reference.md)
+- [What was checked on the TV, including the BT.709 backup files](docs/validation.md)
 
-1. **The TV tells sources it is a stereo device.** Its HDMI EDIDs list only 2-channel LPCM (Audio Data Block `23 09 07 07`) and two speakers (Speaker Allocation Data Block `83 01 00 00`), so a source never offers Dolby Digital or DTS.
-2. **`libFakeEDID` changes the wrong copy.** On this chipset it ends in `SdCommon_SetEDID`, which erases and rewrites sectors of the SPI flash (`MDrv_SERFLASH_SectorErase`, `MDrv_SERFLASH_Write`). The HDMI receiver, however, answers a source's EDID read from **on-chip DDC RAM**, and on this TV that RAM still held the stereo EDIDs afterwards, even after pulling the mains plug.
-3. **The audio path itself is fine.** With `libHDMIpassthru` enabling bitstream passthrough, the TV forwards a 5.1 bitstream to ARC and optical as soon as a source sends one.
+## Requirements
 
-### What `libDDCRAM_EDID` does
+- A TV rooted with `SamyGO-F-SM-MST-Fix`, which provides `samyGOso`.
+- A SamyGO USB stick. These paths are the stick as the TV mounts it: `/mnt/opt/privateer/usr/libso/` for libraries and `/mnt/etc/init.d/` for boot scripts.
+- For audio passthrough, SamyGO [`libHDMIpassthru`](https://forum.samygo.tv/) started with `OPTIONS="AUTO PCM DTS"`.
+- A shell on the TV. See [Root shell access](#root-shell-access).
 
-It calls three functions that MStar's `libUTOPIA.so` exports inside `exeTV`:
+## Dolby Digital 5.1 over ARC
 
-- `MDrv_HDMI_READ_DDCRAM` reads the 256-byte EDID a port currently serves.
-- `MDrv_HDMI_PROG_DDCRAM` writes a new one into the DDC RAM. The library reads it back and compares.
-- `MApi_XC_Sys_SetHPD` pulls hot-plug detect low for 0.8 s on the ports that changed, so the sources there read the new EDID.
+The stock EDIDs advertise only stereo LPCM, so a source never offers Dolby Digital or DTS. `libDDCRAM_EDID` writes the HDMI receiver's DDC RAM, which is the copy a source actually reads. The patched EDID keeps stereo LPCM and adds:
 
-Before writing, it compares, so a port that already holds the wanted EDID is neither rewritten nor pulsed. It refuses any file that is not exactly 256 bytes, lacks the EDID header, or fails either block checksum. The DDC RAM keeps its contents through standby and gets the stereo EDIDs back when the TV has been without mains power, which is why the boot script repeats the load at every start.
+- Dolby Digital 5.1 at 32/44.1/48 kHz, up to 640 kbps.
+- DTS 5.1 at 32/44.1/48 kHz, up to 1536 kbps.
+- A 5.1 speaker-allocation block.
 
-Command line words: `DUMP` (the default) saves each port's EDID to `/dtv/DDCRAM_port<n>.bin`; `LOAD` programs the `DDCRAM_port<n>.bin` files that lie next to the library; `HPD` adds the hot-plug pulse. The log is `/dtv/DDCRAM_EDID.log`.
-
-### Prerequisites
-
-- The TV rooted with SamyGO (`SamyGO-F-SM-MST-Fix` on a USB stick), which provides `samyGOso`.
-- [`libHDMIpassthru`](https://forum.samygo.tv/) from the SamyGO forum, started with `OPTIONS="AUTO PCM DTS"`.
-- A shell on the TV; see [Root shell only on request](#root-shell-only-on-request).
+Video timings and each port's HDMI physical address stay as they were. Multichannel LPCM is not advertised, because ARC cannot carry it. DDC RAM survives standby and is filled with the stereo EDIDs again after mains power is removed, so the boot script loads the patch at every start.
 
 ### Installation
 
-The paths below are those of the SamyGO stick as the TV mounts it: `/mnt/opt/privateer/usr/libso/` for libraries and `/mnt/etc/init.d/` for boot scripts.
+1. Copy `prebuilt/libDDCRAM_EDID.so` to `/mnt/opt/privateer/usr/libso/`.
 
-**1. Copy `prebuilt/libDDCRAM_EDID.so`** to `/mnt/opt/privateer/usr/libso/`.
+2. Dump this TV's EDIDs. Do not use a dump from another set.
 
-**2. Dump the EDIDs of your own TV.** They carry its timings and each port's HDMI physical address, so do not use someone else's.
+   ```sh
+   . /dtv/SGO.env
+   samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libDDCRAM_EDID.so DUMP
+   cat /dtv/DDCRAM_EDID.log
+   ```
 
-```sh
-. /dtv/SGO.env
-samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libDDCRAM_EDID.so DUMP
-cat /dtv/DDCRAM_EDID.log
-```
+   Keep `/dtv/DDCRAM_port0.bin` through `/dtv/DDCRAM_port3.bin`.
 
-```text
-[DUMP] port=0 valid=1 phys=4.0.0.0 ADB=23090707 SADB=83010000
-[DUMP] port=1 valid=1 phys=3.0.0.0 ADB=23090707 SADB=83010000
-[DUMP] port=2 valid=1 phys=1.0.0.0 ADB=23090707 SADB=83010000
-[DUMP] port=3 valid=1 phys=2.0.0.0 ADB=23090707 SADB=83010000
-```
+3. Patch them on a computer:
 
-Fetch `/dtv/DDCRAM_port0.bin` to `/dtv/DDCRAM_port3.bin` and keep a copy.
+   ```sh
+   python3 scripts/patch_edid_51.py ./dumped ./patched
+   ```
 
-**3. Patch them.**
+   Copy the patched files into `/mnt/opt/privateer/usr/libso/` on the stick.
 
-```sh
-python3 scripts/patch_edid_51.py ./dumped ./patched
-```
+4. Load them and pulse hot-plug detect so connected sources read the new EDID:
 
-In the CEA-861 extension block of each EDID this
+   ```sh
+   samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libDDCRAM_EDID.so LOAD HPD
+   cat /dtv/DDCRAM_EDID.log
+   ```
 
-- adds a Dolby Digital descriptor (`15 07 50`: 6 channels, 32/44.1/48 kHz, 640 kbps) and a DTS descriptor (`3d 07 c0`: 6 channels, 32/44.1/48 kHz, 1536 kbps) to the Audio Data Block, and keeps LPCM at 2 channels so that no source tries multichannel LPCM, which ARC cannot carry;
-- sets the Speaker Allocation Data Block to 5.1 (`83 0f 00 00`);
-- moves the detailed timings up by the 6 bytes this takes, refusing if the block's padding is too short, and recomputes the checksum.
+   Each port in use should report `LOAD-OK` or `LOAD-ALREADY-OK`, with:
 
-Copy the patched files to `/mnt/opt/privateer/usr/libso/`.
+   ```text
+   ADB=290907071507503d07c0 SADB=830f0000
+   ```
 
-**4. Try it.**
+   `LOAD-MISMATCH` means the read-back differed. `LOAD-SKIP` means the file is missing or not a valid EDID.
 
-```sh
-rm -f /dtv/DDCRAM_EDID.log
-samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libDDCRAM_EDID.so LOAD HPD
-cat /dtv/DDCRAM_EDID.log
-```
+5. Copy `init/99_91_DDCRAM_EDID.init` to `/mnt/etc/init.d/` and `chmod 755` it. An empty `STOP_EDID` or `STOP` file in the root of the stick skips the script.
 
-```text
-[LOAD-OK] port=0 valid=1 phys=4.0.0.0 ADB=290907071507503d07c0 SADB=830f0000
-[LOAD-OK] port=1 valid=1 phys=3.0.0.0 ADB=290907071507503d07c0 SADB=830f0000
-[LOAD-OK] port=2 valid=1 phys=1.0.0.0 ADB=290907071507503d07c0 SADB=830f0000
-[LOAD-OK] port=3 valid=1 phys=2.0.0.0 ADB=290907071507503d07c0 SADB=830f0000
-[HPD] port=0 pulsed
-[HPD] port=1 pulsed
-[HPD] port=2 pulsed
-[HPD] port=3 pulsed
-```
+### What to set
 
-The source now offers Dolby Digital and DTS (Xbox: *Settings → General → Volume & audio output → HDMI audio*). With `libHDMIpassthru` started as `AUTO PCM DTS`, switching to an HDMI input automatically engages bitstream passthrough. In the TV's *Sound → Speaker Settings / Additional Settings → SPDIF Output → Audio Format* menu, `DTS` mode unlocks every option (`PCM`, `Dolby Digital`, `DTS`, `DTS Neo 2:5`) so clicking one switches the hardware audio router immediately, even though Samsung's OSD summary text (`ExternalOutControl::GetAudioMode`) still displays `PCM` on HDMI whenever the incoming stream is stereo PCM or DTS.
+Set the format in three places. The port a device is plugged into does not matter.
 
-Other lines the log can show: `LOAD-ALREADY-OK` (nothing to do), `LOAD-MISMATCH` (the read-back differs), `LOAD-SKIP` (the file is missing or not a valid EDID).
-
-**5. Make it stick.** Copy `init/99_91_DDCRAM_EDID.init` to `/mnt/etc/init.d/` and `chmod 755` it. An empty file `STOP_EDID` or `STOP` in the root of the stick skips it.
-
----
-
-## Picture: `libPDPTune`
-
-`libPDPTune` first checks that nine symbols of `exeTV` are at the addresses they have in `T-MST12AKUC-2225.0` and that the panel's logic board is driven by the firmware's `LogicFHD` class. If not, it logs that and does nothing.
-
-The words of one injection are the whole configuration. What is not named goes back to stock, so the configuration can be changed while the TV runs.
-
-| Word | Effect |
+| Where | Setting |
 |---|---|
-| `UNLOCK` | Unlocks three calibration features that `PrdInfoManager::CheckSupportOption` hides on this model: **10p White Balance** (`0x4a`), **Color Space → Custom** 6-axis RGBCMY gamut CMS (`0x51`), and **Expert Pattern** (`0x49`). |
-| `DRIVE:STANDARD` | In 2D, the firmware gives the logic board driving mode `0x05` for the Movie and Relax picture modes and `0x11` for Dynamic, Standard and Natural (register `0x806f`). This sends `0x11` wherever the firmware asks for `0x05`. Nothing else about Movie mode changes. |
-| `DEEPBLACK:ON` / `OFF` | Holds the logic board's DeepBlack register (`0x809c`) at `3` or at `0`. |
-| `PEAKSTRETCH:ON` / `OFF` | Holds its PeakStretch register (`0x8063`) at `1` or at `0`. |
-| `DUTY2:<79..160>` | Replaces the constant `128` this panel gets in register `0x89da` whenever it is lit. Boosts above `128` apply only while `APC_OFFSET` (`0x89c0`) is `0` (full Cell Light 20 with no Eco or thermal dimming). |
-| `SUBCONTRAST:<100..160>` | Replaces *Sub Contrast* (register `0x8927` holds the service-menu value times 16). Factory values on this set: `128` in Movie (`MSub Contrast`), `132` in Dynamic/Standard/Natural (`Sub Contrast`). |
-| `GAMMA:TOE` / `2.3` / `2.4` / `BT1886` | Opt-in 12-bit hardware EOTF curve composed onto `exeTV`'s R/G/B gamma LUT inside `MDrv_PNL_SetGammaTbl` (`libUTOPIA.so`). Automatically syncs on boot via `SsScreenBase::SetGammaMode`, preserves Warm2 and 2p/10p White Balance, keeps black at `0` and peak unclipped, and initializes the 257th guard entry (`entry[256] = entry[255]`) that `SdDisplay_SetPictureQuality` leaves unset. Not hooked unless requested. |
-| `OSD_GAMMA:<-3..3>` | Sets `exeTV`'s OSD *Gamma* slider (for example `OSD_GAMMA:0` so `GAMMA:BT1886` builds on the neutral `0` baseline rather than an offset OSD setting). |
-| `OFF` | Nothing: the registers and gamma LUT get the firmware's values back and all hooks are removed. |
-| `DUMP` | Logs the hook states, gamma state, OSD Gamma, registers involved and panel temperature. Changes nothing and can be combined with the others. |
+| **Source** | HDMI audio to **Dolby Digital**, or to **DTS** when the receiver decodes DTS. This is one output format for the whole source, not a per-app switch. Many consoles have no separate "bitstream out" item; the format list is the switch. A Blu-ray player's **Let my receiver decode audio** option is a separate path. |
+| **TV** | **Sound → Additional Settings → SPDIF Output → Audio Format → Dolby Digital**. If that list is greyed out, open **DTS** once, then choose **Dolby Digital**. |
+| **Passthrough** | `libHDMIpassthru` with `OPTIONS="AUTO PCM DTS"`. |
+| **Receiver** | The HDMI-ARC input, or optical. Confirm the format on the receiver. The TV's Audio Format line can keep saying **PCM** while a Dolby Digital or DTS bitstream is going out. |
 
-The boot script's default is `UNLOCK DRIVE:STANDARD`.
+Leave the source in its normal limited RGB range, with the TV's HDMI black level on **Low**. A full/PC RGB mode crushes the codes just above black.
 
-**What is known and what is not.** The register addresses, the values the firmware sends and when it sends them were read from the disassembly of `exeTV`, `libSDAL.so` and `libUTOPIA.so`. What the logic board does with them is not documented, and nothing here has been measured with a meter. In particular:
+### Audio limitations
 
-- The firmware's *Black Optimizer* code writes DeepBlack and PeakStretch as a pair: `0` and `0` for Off, `3` and `0` for Dark Room, `0` and `1` for Bright Room. On the test set, though, the logic board comes up with DeepBlack `3` and PeakStretch `1` at every start and the firmware leaves them there (`BLACK_OPTIMIZER = 3` in NVRAM skips writing either register). `ON` is therefore what this set already does, and `OFF` is the experiment.
-- `128` is the highest `duty_2` the firmware sends to any panel type; higher values are outside what Samsung shipped, so boosts above `128` are automatically held back whenever `APC_OFFSET` (`0x89c0`) is non-zero.
-- `SUBCONTRAST:132` matches the factory *Sub Contrast* Samsung ships for Standard mode on this panel (`132` vs `128` in Movie mode). Values above `132` are outside what Samsung shipped.
-- `GAMMA:*` hooks `MDrv_PNL_SetGammaTbl` (called by `PrimePictureShare::m_PrimePicture_SetGamma` / `SetGamma10PWB` via `SdDisplay_SetPictureQuality` -> `g_IPanel->SetGammaTbl` -> `MDrv_PNL_SetGammaTbl(1, ptrs, 1)` -> `Hal_PNL_Set12BitGammaPerChannel`). At OSD Gamma 0 the firmware's own LUT is linear (exponent about 1.0 on R, G and B, read back from the running set), so a curve sets the panel drive directly, on the assumption that the panel itself answers with a 2.2 power above its black floor. `BT1886` is the ITU-R BT.1886 Annex 1 EOTF for a 10000:1 panel: CNET measured 0.004 fL black on the F5500 series, about 1/10000 of a 40 fL calibrated white. Video black (code 16 after range expansion) stays at drive `0`, the first steps above it are lifted just enough to clear the black floor, and above that it tracks 2.4. `2.3` and `2.4` are power laws above the black floor, and `2.4` is also exactly what BT.1886 becomes as the display's black goes to zero (how zero-black reference monitors run it), so it keeps the first steps above black closest to black; `TOE` deepens only 0–20% IRE without touching midtones or peak white. `scripts/gamma_curves.py` generates every curve but `TOE` (`--contrast N` for a measured panel) and `make test` checks the header against it. On cold boot or first activation, `libPDPTune` asks `SsScreenBase::SetGammaMode` to replay `exeTV`'s real 12-bit LUT so the curve applies immediately without a menu toggle.
-- With `BT1886`, *Brightness* has to sit exactly at the black point: every code of offset above black is lifted along with the first real shadow steps, which is what makes letterbox bars glow. Set it on a near-black PLUGE in the source's own range (Xbox *Standard* with HDMI Black Level *Low*): the lowest value at which code 17–18 still shows against the 16 bars.
+- Content-aware automatic switching is not implemented. Beam has no input-format override, and Samsung exposes only stereo PCM capture and stereo level reporting, not the six decoded channels needed to detect surround activity inside a DD 5.1 container. A clean implementation would require a new multichannel decoder/DSP tap and a hysteretic PCM/bitstream router.
+- Because the source format is global, stereo programmes are re-encoded into Dolby Digital when the source is set to Dolby Digital. They are not passed as stereo PCM for the receiver to upmix.
+- DTS 5.1 is advertised and selected the same way. Playback was not checked on a receiver that only decodes Dolby Digital.
+- This path does not carry multichannel LPCM, Dolby Digital Plus, TrueHD/Atmos, DTS-HD, or eARC.
 
-Treat `DEEPBLACK`, `PEAKSTRETCH`, `DUTY2`, `SUBCONTRAST` and `GAMMA` as experiments: change one at a time, compare by eye or with a meter, and keep what holds up. More light means more power, heat and wear on a plasma panel. None of this outlasts a restart of the TV.
+The checks behind those limits are in [validation](docs/validation.md).
+
+## Plasma picture tuning
+
+`libPDPTune` checks nine `exeTV` symbols and the `LogicFHD` panel driver before it hooks anything. A different firmware is logged and left unchanged. Each injection is the whole configuration: a word that is left out goes back to stock.
 
 ### Installation
 
 Copy `prebuilt/libPDPTune.so` to `/mnt/opt/privateer/usr/libso/` and `init/99_92_PDPTune.init` to `/mnt/etc/init.d/` (`chmod 755`).
 
-To boot with other options than the default, put them in `/mnt/opt/privateer/usr/libso/libPDPTune.conf`:
+The boot script's default is `UNLOCK DRIVE:STANDARD`. The file `/mnt/opt/privateer/usr/libso/libPDPTune.conf` replaces that default. One or more words per line. An empty `STOP_PDPTUNE` or `STOP` in the root of the stick skips the script.
+
+The configuration on this TV is:
 
 ```text
-# one or more words per line
-UNLOCK DRIVE:STANDARD
-DEEPBLACK:ON
+UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON SUBCONTRAST:132 DUTY2:139 OSD_GAMMA:0 GAMMA:2.4
 ```
 
-An empty file `STOP_PDPTUNE` or `STOP` in the root of the stick skips the script.
+### Options
 
-To change the configuration on the running TV:
+| Option | On this TV | What it does |
+|---|---|---|
+| `UNLOCK` | **Enabled** | Shows 10-point White Balance, Color Space → Custom, and Expert Pattern. |
+| `DRIVE:STANDARD` | **Enabled** | In 2D, Movie and Relax normally use drive mode `0x05` and Dynamic, Standard, and Natural use `0x11` (register `0x806f`). This sends `0x11` wherever the firmware asks for `0x05`. |
+| `DEEPBLACK:ON` / `OFF` | **Enabled** (`ON`) | Holds the Deep Black register `0x809c` at `3`. `OFF` holds it at `0`. `ON` is the value this panel already has at startup. What the logic board does with it is not documented. |
+| `PEAKSTRETCH:ON` / `OFF` | **Enabled** (`ON`) | Holds the Peak Stretch register `0x8063` at `1`. `OFF` holds it at `0`. `ON` is the value this panel already has at startup. What the logic board does with it is not documented. |
+| `SUBCONTRAST:<100..160>` | **132** | Sets Sub Contrast (register `0x8927`, the service value times 16) apart from the Contrast menu. `132` is the factory Standard value. Movie's factory value is `128`. This is a level, not a switch. |
+| `DUTY2:<79..160>` | **139, experimental** | Writes the second panel duty word. See [Duty](#duty). |
+| `GAMMA:TOE` / `2.3` / `2.4` / `BT1886` | **`2.4`** | Composes a 12-bit curve onto `exeTV`'s gamma LUT and keeps white balance. Not hooked unless one of these words is present. |
+| `OSD_GAMMA:<-3..3>` | **0** | Sets the OSD Gamma slider the curve is built on. `0` is the neutral baseline. |
+| `DUMP` | **Not left on** | Logs hook state, registers, OSD Gamma, and panel temperature. Changes nothing. |
+| `OFF` | **Not in use** | Removes the hooks and restores the firmware's register and gamma values. |
+
+The firmware writes Deep Black and Peak Stretch as a pair from Black Optimizer: `0`/`0` for Off, `3`/`0` for Dark Room, and `0`/`1` for Bright Room. This set powers on at `3`/`1` and the firmware leaves that pair alone, which is why both overrides are enabled.
+
+### Duty
+
+`DUTY2` is the second duty word the logic board is given while the panel is lit (register `0x89da`). Samsung sends a constant. It is not a percentage of brightness, and it is not the Cell Light control.
+
+| Value | What that maximum means |
+|---|---|
+| **128** | The highest duty value this firmware sends to any panel type. That is Samsung's ceiling. |
+| **139** | The value on this TV, 11 counts above that ceiling. |
+| **160** | The highest number `libPDPTune` will accept. This is an input limit in the tool, not a Samsung rating and not a point that has been checked as safe. |
+
+A value above `128` is written only while `APC_OFFSET` (`0x89c0`) is `0`, which is Cell Light 20 with Eco and thermal dimming off. While automatic power control is active, the override stays at Samsung's ceiling. More light means more power, heat, and wear. Nothing here claims a measured increase in brightness or a known lifetime cost.
+
+### Picture menu
+
+These are the menu settings used with the configuration above:
+
+| Control | Setting |
+|---|---|
+| Picture mode | Movie |
+| Cell Light | 20 |
+| Contrast | 100 |
+| Brightness | 50 |
+| Color Space | Custom, with the BT.709 values below |
+| Gamma | 0 on the OSD slider (`OSD_GAMMA:0`), curve `GAMMA:2.4` |
+| Source range | Standard / limited RGB, HDMI black level **Low** |
+
+`2.4` is the curve BT.1886 becomes when the display's own black is treated as zero. Full-range RGB on the source crushes the codes just above black into that toe. Brightness has to sit on the black point: on a near-black PLUGE, in the source's own range, 50 is the value at which the bars above black are still just visible on this set.
+
+### BT.709
+
+Color Space → Custom, used with `GAMMA:2.4`:
+
+| Colour | R | G | B | Estimated dE00 |
+|---|---:|---:|---:|---:|
+| Red | 46 | 0 | 17 | 0.56 |
+| Green | 34 | 57 | 16 | 0.29 |
+| Blue | 20 | 0 | 49 | 1.99 |
+| Yellow | 48 | 56 | 21 | 0.53 |
+| Cyan | 37 | 56 | 51 | 0.74 |
+| Magenta | 46 | 0 | 50 | 1.03 |
+
+These dE00 figures are calculated from a 2014 measurement of a different PN60F5500, not from a meter on this panel. Blue and magenta cannot reach a BT.709 primary inside that measured native gamut. The checksums of the picture-state files and how they were restored are in [validation](docs/validation.md).
+
+### Apply a configuration
 
 ```sh
 . /dtv/SGO.env
-samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libPDPTune.so UNLOCK DRIVE:STANDARD DEEPBLACK:ON DUMP
+samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libPDPTune.so \
+    UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON SUBCONTRAST:132 DUTY2:139 OSD_GAMMA:0 GAMMA:2.4 DUMP
 cat /dtv/PDPTune.log
 ```
 
-```text
-libPDPTune 2.3.0: UNLOCK DRIVE:STANDARD SUBCONTRAST:132 OSD_GAMMA:0 GAMMA:BT1886 DUMP
-LogicFHD::m_Logic_WriteI2C hooked
-DrivingMode 0x806f: firmware 0x0005, panel 0x0011
-DeepBlack   0x809c: firmware 0x0003, panel 0x0003
-PeakStretch 0x8063: firmware 0x0001, panel 0x0001
-duty_2      0x89da: firmware 0x0080, panel 0x0080
-SubContrast 0x8927: firmware 0x0800, panel 0x0840
-PrdInfoManager::CheckSupportOption hooked
-MDrv_PNL_SetGammaTbl hooked
-OSD Gamma synced at 0
-gamma BT1886 applied to firmware LUT
-dump LogicFHD::m_Logic_WriteI2C is hooked
-dump PrdInfoManager::CheckSupportOption is hooked
-dump MDrv_PNL_SetGammaTbl is hooked
-dump gamma mode BT1886 (stock LUT captured)
-dump DrivingMode 0x806f = 0x0111
-dump DeepBlack   0x809c = 0x0003
-dump PeakStretch 0x8063 = 0x0001
-dump duty_2      0x89da = 0x0080
-dump SubContrast 0x8927 = 0x0840
-dump APC offset  0x89c0 = 0x0000
-dump SubBright   0x8926 = 0x0450
-dump OSD Gamma 0
-dump panel temperature 46 C
-done
-```
+A bad word is reported and the whole injection is ignored. Drive, duty, Sub Contrast, and gamma are experiments: change one at a time. None of them outlasts a restart unless the boot script loads them again.
 
-The first block gives, per register, what the firmware last asked for (or, before it has asked, what the logic board held) and what the logic board has now. The `dump` lines are raw read-backs; the logic board reports status in the high byte of DrivingMode. A bad word is reported and the whole injection is ignored.
+## Root shell access
 
-### How it works
+A stock SamyGO stick opens root FTP (21), telnet (23), and a raw root shell (4023) with no password. `init/run1.sh` and `init/01_02_telnet.init` bring those up only while the root of the stick contains an empty file named `ENABLE_SHELL`.
 
-- **Finding things.** `exeTV` is not position independent and exports its C++ symbols, so the library looks each one up with `dlsym` and requires the address it expects. The logic board object comes from the exported `TDcLogic::m_poLogicIC`, and its vtable pointer must be that of `LogicFHD`.
-- **Hooks.** The first instruction of `LogicFHD::m_Logic_WriteI2C`, `PrdInfoManager::CheckSupportOption`, and (only when `GAMMA:*` is requested) `MDrv_PNL_SetGammaTbl` is replaced by a branch. That is one aligned word, so a thread entering the function sees either the old instruction or the new one, and hooks can be set and removed while `exeTV` runs. A branch reaches 32 MiB and libraries are mapped much further away, so it lands on a small stub in a page mapped into a gap near `exeTV` (or near `libUTOPIA.so` for gamma), which jumps on to the library. Before patching or restoring, the library checks that the word it is about to replace is the one it expects.
-- **Overrides.** The firmware rewrites these registers whenever the picture mode, *Black Optimizer* or *Cell Light* changes, so the override sits in the write path. The library remembers what the firmware last asked for, which is what it restores when an override is dropped.
-- **Threads.** `samyGOso` borrows a thread of `exeTV` wherever that thread happens to be, possibly inside a firmware lock. The library therefore does its work on a thread of its own.
+## Build and test
 
----
-
-## Root shell only on request
-
-A stock SamyGO stick leaves root FTP (21), telnet (23) and a raw root shell (4023) open to the network without a password. With `init/run1.sh` (for `SamyGO_data/run1.sh` on the stick) and `init/01_02_telnet.init` (for `/mnt/etc/init.d/`) they come up only while the root of the stick holds an empty file `ENABLE_SHELL`. Create the file on a computer, boot the TV with the stick, do the work, and delete the file again.
-
----
-
-## Building
-
-The TV runs Linux 3.0.33 on ARMv7 with the soft-float ABI and glibc 2.14.1. Any `arm-linux-gnueabi` GCC will do:
+The TV is Linux 3.0.33, ARMv7, soft-float, glibc 2.14.1.
 
 ```sh
 sudo apt install gcc-arm-linux-gnueabi qemu-user shellcheck
-make            # build/libDDCRAM_EDID.so, build/libPDPTune.so
-make test       # run both against test/fake_exetv.c under qemu-arm
-make lint       # shellcheck the boot scripts
-make prebuilt   # copy the libraries to prebuilt/
+make
+make test
+make lint
+make prebuilt
 ```
 
-The libraries are linked without naming any library of their own; inside `exeTV` their imports bind to the libc already loaded there. The build fails if a library imports a symbol that is not on the list in the `Makefile`, all of which the TV's libc has. This catches the redirections newer libc headers apply, such as `strtol` to `__isoc23_strtol`.
+`make test` runs both libraries against `test/fake_exetv.c` under QEMU. It checks arguments, hooks, overrides, gamma tables, and EDID rules. It does not check ARC playback or the picture on a panel.
 
-`test/fake_exetv.c` puts stand-ins for the firmware's functions and objects at the addresses they have in the real `exeTV`, with the real first instructions, and loads the libraries the way `samyGOso` does. It checks argument handling, hooking and unhooking under load, that overrides follow the firmware and are undone, and the EDID rules.
+## Disable or revert
 
----
-
-## Reverting
-
-- `STOP_PDPTUNE`, `STOP_EDID` or `STOP` in the root of the stick: the respective boot script does nothing.
-- `STOP_SAMYGO` there, or no stick: the TV boots stock.
-- On the running TV, `samyGOso -T -B -r -l …/libPDPTune.so OFF` restores the registers and removes the hooks. The EDIDs return to stock at the next power-on without the boot script.
+- `STOP_EDID` skips the EDID boot script. `STOP_PDPTUNE` skips the picture boot script. `STOP` skips both.
+- `STOP_SAMYGO`, or booting with no stick, starts the TV stock.
+- `samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libPDPTune.so OFF` removes the picture hooks on a running TV.
+- Without the EDID boot script, the stereo EDIDs return at the next power-on.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

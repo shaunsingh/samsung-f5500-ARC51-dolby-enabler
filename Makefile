@@ -27,7 +27,7 @@ build/libPDPTune.so: LDFLAGS += -Wl,-z,nodelete
 # What a payload may import: symbols the TV's libc, libdl and libpthread have.
 # The headers of a newer libc redirect some functions to symbols those lack
 # (strtol to __isoc23_strtol, for one), which would only show on the TV.
-IMPORTS := __errno_location __isoc99_fscanf close dlclose dlopen dlsym fclose fopen64 free malloc memcmp memset \
+IMPORTS := __errno_location __isoc99_fscanf close dlclose dlopen dlsym fclose fopen64 free malloc memcmp memcpy memset \
            mmap64 mprotect munmap open64 pthread_create pthread_detach pthread_mutex_lock pthread_mutex_unlock \
            read snprintf sprintf strcasecmp strcmp strerror strlen strncasecmp strrchr sysconf usleep vsnprintf \
            write
@@ -40,6 +40,8 @@ all: $(LIBS)
 
 build:
 	mkdir -p $@
+
+build/libPDPTune.so: src/gamma_tables.h
 
 build/%.so: src/%.c src/samygo.h | build
 	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,-soname,$(@F) $< -o $@ -lgcc

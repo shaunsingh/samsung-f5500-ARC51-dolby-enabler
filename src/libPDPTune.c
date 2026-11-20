@@ -10,9 +10,11 @@
  *                           firmware uses for Dynamic, Standard and Natural
  *   DEEPBLACK:ON|OFF        hold the logic board's DeepBlack on or off
  *   PEAKSTRETCH:ON|OFF      hold the logic board's PeakStretch on or off
- *   DUTY2:<79..160>         replace this panel's fixed duty_2 of 128, which
- *                           is also the most the firmware sends any panel
- *   SUBCONTRAST:<100..160>  replace the factory Sub Contrast
+ *   DUTY2:<79..160>         replace this panel's fixed duty_2 of 128 (boosts
+ *                           above 128 apply only when APC_OFFSET is 0)
+ *   SUBCONTRAST:<100..160>  replace Sub Contrast (factory: 128 Movie, 132 Std)
+ *   GAMMA:TOE|2.3|2.4|BT1886  compose a 12-bit EOTF curve onto exeTV's gamma
+ *                           LUT in MDrv_PNL_SetGammaTbl (opt-in)
  *   OFF                     nothing: stock registers, hooks removed
  *   DUMP                    log the registers involved; changes nothing
  *
@@ -23,12 +25,14 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
 
+#include "gamma_tables.h"
 #include "samygo.h"
 
-#define VERSION  "2.0.0"
+#define VERSION  "2.1.0"
 #define LOG      "/dtv/PDPTune.log"
 #define say(...) sgo_log(LOG, __VA_ARGS__)
 
@@ -51,13 +55,15 @@ static const struct {
     [F_LOGIC_FHD_VTABLE] = { "_ZTV8LogicFHD", 0x018aea00 },
 };
 
-typedef int write_i2c_fn(void *logic, uint16_t reg, uint16_t value);
-typedef int read_i2c_fn(void *logic, uint16_t reg, uint16_t *value);
-typedef int panel_temp_fn(void *logic, int *celsius);
-typedef int support_option_fn(void *self, int option, bool *supported);
+typedef int     write_i2c_fn(void *logic, uint16_t reg, uint16_t value);
+typedef int     read_i2c_fn(void *logic, uint16_t reg, uint16_t *value);
+typedef int     panel_temp_fn(void *logic, int *celsius);
+typedef int     support_option_fn(void *self, int option, bool *supported);
+typedef uint8_t set_gamma_fn(int lut_type, uint8_t **gamma_tab, int map_mode);
 
 #define EXETV_BASE    0x8000u /* lowest address of the exeTV image */
 #define OPTION_WB_10P 0x4a    /* IProductInfo::ProductSupportOption_k */
+#define REG_APC_OFFSET 0x89c0 /* (1024 - duty) >> 1; 0 at full Cell Light 20 */
 
 static bool firmware_matches(void)
 {
@@ -108,6 +114,7 @@ static struct knob {
 
 /* Serialises the workers and the knob state they share with the write hook. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static int             g_apc_offset = UNKNOWN;
 
 static struct knob *knob_for(uint16_t reg)
 {
@@ -120,6 +127,9 @@ static struct knob *knob_for(uint16_t reg)
 static uint16_t tuned(const struct knob *knob, uint16_t stock)
 {
     if (knob->to == KEEP || (knob->from != ANY && knob->from != stock))
+        return stock;
+    /* Respect Cell Light < 20, Eco, and thermal ABL: only boost duty_2 when APC_OFFSET == 0. */
+    if (knob == &g_knobs[K_DUTY2] && knob->to > DUTY2_FIXED && g_apc_offset != 0)
         return stock;
     return (uint16_t)knob->to;
 }
@@ -143,31 +153,37 @@ static uint16_t tuned(const struct knob *knob, uint16_t stock)
 #define INSN_B           0xea000000u
 #define BRANCH_REACH     0x02000000u
 
-enum { H_WRITE_I2C, H_SUPPORT_OPTION, H_COUNT };
+enum { H_WRITE_I2C, H_SUPPORT_OPTION, H_SET_GAMMA, H_COUNT };
 enum { STUB_ENTRY = 0, STUB_RESUME = 2, STUB_WORDS = 5 };
 
 static write_i2c_fn      on_write_i2c;
 static support_option_fn on_support_option;
+static set_gamma_fn      on_set_gamma;
 
 static struct hook {
     const char *name;
-    int         function;
+    int         function; /* F_* index, or -1 if resolved dynamically via symbol */
+    const char *symbol;   /* used when function < 0 */
+    uintptr_t   addr;
     uint32_t    insn; /* its first instruction, which must not depend on pc */
     void      (*detour)(void);
     uint32_t   *stub;
     bool        installed;
 } g_hooks[H_COUNT] = {
-    /* Both begin with push {r4, r5, r6, r7, fp, lr}. */
-    [H_WRITE_I2C]      = { "LogicFHD::m_Logic_WriteI2C", F_WRITE_I2C, 0xe92d48f0,
+    /* First two begin with push {r4, r5, r6, r7, fp, lr}; SetGammaTbl with push {r4..r8, sl, fp, lr}. */
+    [H_WRITE_I2C]      = { "LogicFHD::m_Logic_WriteI2C", F_WRITE_I2C, NULL, 0, 0xe92d48f0,
                            (void (*)(void))on_write_i2c, NULL, false },
-    [H_SUPPORT_OPTION] = { "PrdInfoManager::CheckSupportOption", F_SUPPORT_OPTION, 0xe92d48f0,
+    [H_SUPPORT_OPTION] = { "PrdInfoManager::CheckSupportOption", F_SUPPORT_OPTION, NULL, 0, 0xe92d48f0,
                            (void (*)(void))on_support_option, NULL, false },
+    [H_SET_GAMMA]      = { "MDrv_PNL_SetGammaTbl", -1, "MDrv_PNL_SetGammaTbl", 0, 0xe92d4df0,
+                           (void (*)(void))on_set_gamma, NULL, false },
 };
 
 /*
  * Maps a page that a branch can reach from every address in [lowest, highest].
  * The first free one past the start of exeTV lies between the segments of
- * exeTV itself, where nothing else will ever ask to be mapped.
+ * exeTV itself (or below libUTOPIA.so for gamma), where nothing else asks to
+ * be mapped.
  */
 static uint32_t *map_stub_page(size_t size, uintptr_t lowest, uintptr_t highest)
 {
@@ -193,40 +209,79 @@ static uint32_t *map_stub_page(size_t size, uintptr_t lowest, uintptr_t highest)
     return page;
 }
 
-static bool hooks_prepare(void)
+static bool hook_resolve(struct hook *hook)
 {
-    size_t    size = (size_t)sysconf(_SC_PAGESIZE);
-    uintptr_t lowest = UINTPTR_MAX, highest = 0;
-    for (int i = 0; i < H_COUNT; i++) {
-        uintptr_t function = g_firmware[g_hooks[i].function].addr;
-        lowest = function < lowest ? function : lowest;
-        highest = function > highest ? function : highest;
+    if (hook->addr)
+        return true;
+    if (hook->function >= 0) {
+        hook->addr = g_firmware[hook->function].addr;
+        return true;
+    }
+    void *self = dlopen(NULL, RTLD_LAZY);
+    if (!self)
+        return false;
+    hook->addr = (uintptr_t)dlsym(self, hook->symbol);
+    dlclose(self);
+    if (!hook->addr) {
+        say("%s: symbol not found", hook->name);
+        return false;
+    }
+    return true;
+}
+
+static void write_stub(uint32_t *stub, const struct hook *hook)
+{
+    stub[STUB_ENTRY] = INSN_LDR_PC_NEXT;
+    stub[STUB_ENTRY + 1] = (uint32_t)(uintptr_t)hook->detour;
+    stub[STUB_RESUME] = hook->insn;
+    stub[STUB_RESUME + 1] = INSN_LDR_PC_NEXT;
+    stub[STUB_RESUME + 2] = (uint32_t)(hook->addr + 4);
+}
+
+static bool hook_prepare(struct hook *hook)
+{
+    if (!hook_resolve(hook))
+        return false;
+
+    size_t size = (size_t)sysconf(_SC_PAGESIZE);
+    if (hook == &g_hooks[H_SET_GAMMA]) {
+        uint32_t *page = map_stub_page(size, hook->addr, hook->addr);
+        if (!page) {
+            say("%s: no free page within branch reach", hook->name);
+            return false;
+        }
+        write_stub(page, hook);
+        if (mprotect(page, size, PROT_READ | PROT_EXEC) != 0) {
+            say("%s: cannot make hook stub executable: %s", hook->name, strerror(errno));
+            munmap(page, size);
+            return false;
+        }
+        __builtin___clear_cache((char *)page, (char *)page + size);
+        hook->stub = page;
+        return true;
     }
 
+    /* exeTV hooks share one stub page within branch reach of both. */
+    uintptr_t lowest = UINTPTR_MAX, highest = 0;
+    for (int i = 0; i < H_SET_GAMMA; i++) {
+        hook_resolve(&g_hooks[i]);
+        lowest = g_hooks[i].addr < lowest ? g_hooks[i].addr : lowest;
+        highest = g_hooks[i].addr > highest ? g_hooks[i].addr : highest;
+    }
     uint32_t *page = map_stub_page(size, lowest, highest);
     if (!page) {
         say("no free page within branch reach of the functions to hook");
         return false;
     }
-
-    for (int i = 0; i < H_COUNT; i++) {
-        uint32_t *stub = page + i * STUB_WORDS;
-        uintptr_t function = g_firmware[g_hooks[i].function].addr;
-        stub[STUB_ENTRY] = INSN_LDR_PC_NEXT;
-        stub[STUB_ENTRY + 1] = (uint32_t)(uintptr_t)g_hooks[i].detour;
-        stub[STUB_RESUME] = g_hooks[i].insn;
-        stub[STUB_RESUME + 1] = INSN_LDR_PC_NEXT;
-        stub[STUB_RESUME + 2] = (uint32_t)(function + 4);
-    }
-
+    for (int i = 0; i < H_SET_GAMMA; i++)
+        write_stub(page + i * STUB_WORDS, &g_hooks[i]);
     if (mprotect(page, size, PROT_READ | PROT_EXEC) != 0) {
         say("cannot make the hook stubs executable: %s", strerror(errno));
         munmap(page, size);
         return false;
     }
     __builtin___clear_cache((char *)page, (char *)page + size);
-
-    for (int i = 0; i < H_COUNT; i++)
+    for (int i = 0; i < H_SET_GAMMA; i++)
         g_hooks[i].stub = page + i * STUB_WORDS;
     return true;
 }
@@ -249,10 +304,10 @@ static bool hook_set(struct hook *hook, bool on)
 {
     if (hook->installed == on)
         return true;
-    if (!hook->stub && !hooks_prepare())
+    if (!hook->stub && !hook_prepare(hook))
         return false;
 
-    uint32_t *at = (uint32_t *)g_firmware[hook->function].addr;
+    uint32_t *at = (uint32_t *)hook->addr;
     uint32_t  branch = INSN_B | ((((uintptr_t)hook->stub - (uintptr_t)(at + 2)) >> 2) & 0x00ffffffu);
     uint32_t  expected = on ? hook->insn : branch;
     if (*at != expected) {
@@ -282,14 +337,23 @@ static int read_i2c(void *logic, uint16_t reg, uint16_t *value)
 
 static int on_write_i2c(void *logic, uint16_t reg, uint16_t value)
 {
+    if (reg == REG_APC_OFFSET) {
+        pthread_mutex_lock(&g_lock);
+        g_apc_offset = value;
+        pthread_mutex_unlock(&g_lock);
+        return write_i2c(logic, reg, value);
+    }
+
     struct knob *knob = knob_for(reg);
     if (!knob)
         return write_i2c(logic, reg, value);
 
     pthread_mutex_lock(&g_lock);
     knob->stock = value;
-    knob->sent = tuned(knob, value);
-    int result = write_i2c(logic, reg, (uint16_t)knob->sent);
+    uint16_t want = tuned(knob, value);
+    int      result = write_i2c(logic, reg, want);
+    if (result == 0)
+        knob->sent = want;
     pthread_mutex_unlock(&g_lock);
     return result;
 }
@@ -297,10 +361,114 @@ static int on_write_i2c(void *logic, uint16_t reg, uint16_t value)
 static int on_support_option(void *self, int option, bool *supported)
 {
     if (option == OPTION_WB_10P) {
-        *supported = true;
+        if (supported)
+            *supported = true;
         return 1;
     }
     return ((support_option_fn *)(g_hooks[H_SUPPORT_OPTION].stub + STUB_RESUME))(self, option, supported);
+}
+
+/*
+ * 12-bit hardware gamma LUT in libUTOPIA.so (MDrv_PNL_SetGammaTbl, map_mode 1).
+ *
+ * SdDisplay_SetPictureQuality packs 256 12-bit entries per channel into 384 bytes
+ * (two entries per 3 bytes: low nibbles in s[0], high bytes in s[1] and s[2]).
+ * Hal_PNL_Set12BitGammaPerChannel also reads entry 256 at bytes 384..385 for the
+ * top interpolation slope, so we emit 386 bytes with entry[256] = entry[255].
+ */
+#define GAMMA_PACKED_STOCK 384
+#define GAMMA_PACKED_OUT   386
+
+static int     g_gamma_mode = GAMMA_NONE;
+static bool    g_gamma_have_stock;
+static int     g_gamma_lut_type = 1;
+static uint8_t g_gamma_stock[3][GAMMA_PACKED_STOCK];
+static uint8_t g_gamma_out[3][GAMMA_PACKED_OUT];
+
+static uint8_t set_gamma_orig(int lut_type, uint8_t **gamma_tab, int map_mode)
+{
+    return ((set_gamma_fn *)(g_hooks[H_SET_GAMMA].stub + STUB_RESUME))(lut_type, gamma_tab, map_mode);
+}
+
+static void unpack_gamma_12bit(const uint8_t src[GAMMA_PACKED_STOCK], uint16_t dst[256])
+{
+    for (int k = 0; k < 128; k++) {
+        const uint8_t *s = src + 3 * k;
+        dst[2 * k]     = (uint16_t)((s[0] & 0x0fu) | ((uint16_t)s[1] << 4));
+        dst[2 * k + 1] = (uint16_t)((s[0] >> 4) | ((uint16_t)s[2] << 4));
+    }
+}
+
+static void pack_gamma_12bit(const uint16_t src[256], uint8_t dst[GAMMA_PACKED_OUT])
+{
+    for (int k = 0; k < 128; k++) {
+        uint16_t v0 = src[2 * k] & 0x0fffu;
+        uint16_t v1 = src[2 * k + 1] & 0x0fffu;
+        uint8_t *d = dst + 3 * k;
+        d[0] = (uint8_t)((v0 & 0x0fu) | ((v1 & 0x0fu) << 4));
+        d[1] = (uint8_t)(v0 >> 4);
+        d[2] = (uint8_t)(v1 >> 4);
+    }
+    /* Guard entry 256 so Hal_PNL_Set12BitGammaPerChannel sees zero slope at peak. */
+    uint16_t peak = src[255] & 0x0fffu;
+    dst[384] = (uint8_t)(peak & 0x0fu);
+    dst[385] = (uint8_t)(peak >> 4);
+}
+
+static void compose_gamma_channel(const uint8_t stock_packed[GAMMA_PACKED_STOCK], int mode,
+                                  uint8_t out_packed[GAMMA_PACKED_OUT])
+{
+    uint16_t stock[256], out[256];
+    unpack_gamma_12bit(stock_packed, stock);
+
+    if (mode == GAMMA_NONE) {
+        pack_gamma_12bit(stock, out_packed);
+        return;
+    }
+
+    const uint16_t *curve = g_gamma_curves[mode];
+    for (int i = 0; i < 256; i++) {
+        uint32_t scaled = (uint32_t)curve[i] * 255u;
+        uint32_t idx = scaled / 4095u;
+        uint32_t frac = scaled % 4095u;
+        if (idx >= 255u) {
+            out[i] = stock[255];
+        } else {
+            int32_t d = (int32_t)stock[idx + 1] - (int32_t)stock[idx];
+            int32_t num = d * (int32_t)frac;
+            int32_t delta = num >= 0 ? (num + 2047) / 4095 : (num - 2047) / 4095;
+            int32_t v = (int32_t)stock[idx] + delta;
+            out[i] = (uint16_t)(v < 0 ? 0 : (v > 4095 ? 4095 : v));
+        }
+    }
+    pack_gamma_12bit(out, out_packed);
+}
+
+static uint8_t apply_gamma_locked(void)
+{
+    uint8_t *ptrs[3] = { g_gamma_out[0], g_gamma_out[1], g_gamma_out[2] };
+    for (int ch = 0; ch < 3; ch++)
+        compose_gamma_channel(g_gamma_stock[ch], g_gamma_mode, g_gamma_out[ch]);
+    return set_gamma_orig(g_gamma_lut_type, ptrs, 1);
+}
+
+static uint8_t on_set_gamma(int lut_type, uint8_t **gamma_tab, int map_mode)
+{
+    if (map_mode != 1 || !gamma_tab || !gamma_tab[0] || !gamma_tab[1] || !gamma_tab[2])
+        return set_gamma_orig(lut_type, gamma_tab, map_mode);
+
+    pthread_mutex_lock(&g_lock);
+    if (!g_hooks[H_SET_GAMMA].installed) {
+        pthread_mutex_unlock(&g_lock);
+        return set_gamma_orig(lut_type, gamma_tab, map_mode);
+    }
+    g_gamma_lut_type = lut_type;
+    for (int ch = 0; ch < 3; ch++)
+        memcpy(g_gamma_stock[ch], gamma_tab[ch], GAMMA_PACKED_STOCK);
+    g_gamma_have_stock = true;
+    uint8_t result = apply_gamma_locked();
+    pthread_mutex_unlock(&g_lock);
+    return result;
 }
 
 /* The logic board object, once exeTV has created it and if it is a LogicFHD. */
@@ -325,6 +493,10 @@ static void *logic_board(void)
 /* Brings every knob's register in line with its override. */
 static void sync_knobs(void *logic)
 {
+    uint16_t apc;
+    if (read_i2c(logic, REG_APC_OFFSET, &apc) == 0)
+        g_apc_offset = apc;
+
     for (struct knob *knob = g_knobs; knob < g_knobs + K_COUNT; knob++) {
         if (knob->stock == UNKNOWN) {
             uint16_t value;
@@ -351,6 +523,7 @@ struct request {
     bool configure; /* false leaves the configuration as it is */
     bool dump;
     bool unlock;
+    int  gamma;
     int  to[K_COUNT];
 };
 
@@ -372,6 +545,7 @@ static void configure(const struct request *request, void *logic)
 
     if (tune && !hook->installed && hook_set(hook, true)) {
         usleep(HOOK_SETTLE_US);
+        g_apc_offset = UNKNOWN;
         for (int i = 0; i < K_COUNT; i++)
             g_knobs[i].stock = g_knobs[i].sent = UNKNOWN;
     }
@@ -382,6 +556,26 @@ static void configure(const struct request *request, void *logic)
     }
 
     hook_set(&g_hooks[H_SUPPORT_OPTION], request->unlock);
+
+    struct hook *ghook = &g_hooks[H_SET_GAMMA];
+    g_gamma_mode = request->gamma;
+    if (g_gamma_mode != GAMMA_NONE) {
+        if (hook_set(ghook, true)) {
+            if (g_gamma_have_stock) {
+                apply_gamma_locked();
+                say("gamma %s applied to firmware LUT", g_gamma_names[g_gamma_mode]);
+            } else {
+                say("gamma %s armed (applies on next firmware gamma load)", g_gamma_names[g_gamma_mode]);
+            }
+        }
+    } else if (ghook->installed) {
+        if (g_gamma_have_stock) {
+            apply_gamma_locked();
+            say("gamma restored to firmware LUT");
+        }
+        hook_set(ghook, false);
+        g_gamma_have_stock = false;
+    }
 }
 
 static void dump_register(void *logic, const char *name, uint16_t reg)
@@ -397,6 +591,8 @@ static void dump(void *logic)
 {
     for (int i = 0; i < H_COUNT; i++)
         say("dump %s is %s", g_hooks[i].name, g_hooks[i].installed ? "hooked" : "not hooked");
+    say("dump gamma mode %s (stock LUT %s)", g_gamma_names[g_gamma_mode],
+        g_gamma_have_stock ? "captured" : "not captured");
     if (!logic)
         return;
 
@@ -504,6 +700,15 @@ static bool parse_word(const char *word, struct request *request)
             return false;
         request->to[K_SUB_CONTRAST] = level << 4;
         return true;
+    }
+    if ((value = value_of(word, "GAMMA"))) {
+        for (int m = GAMMA_TOE; m < GAMMA_COUNT; m++) {
+            if (strcasecmp(value, g_gamma_names[m]) == 0) {
+                request->gamma = m;
+                return true;
+            }
+        }
+        return false;
     }
     return false;
 }

@@ -43,17 +43,51 @@ FIRMWARE_FUNCTION(".fw.read_i2c", READ_I2C, "body_read_i2c");
 FIRMWARE_FUNCTION(".fw.panel_temp", PANEL_TEMP, "body_panel_temp");
 FIRMWARE_FUNCTION(".fw.support_option", SUPPORT_OPTION, "body_support_option");
 
-int fw_write_i2c(void *logic, uint16_t reg, uint16_t value) __asm__(WRITE_I2C);
-int fw_support_option(void *self, int option, bool *supported) __asm__(SUPPORT_OPTION);
+/* MDrv_PNL_SetGammaTbl in libUTOPIA.so begins with push {r4..r8, sl, fp, lr} (0xe92d4df0). */
+__asm__(".text\n"
+        ".arm\n"
+        ".global MDrv_PNL_SetGammaTbl\n"
+        ".type MDrv_PNL_SetGammaTbl, %function\n"
+        "MDrv_PNL_SetGammaTbl:\n"
+        "    push {r4, r5, r6, r7, r8, sl, fp, lr}\n"
+        "    add fp, sp, #28\n"
+        "    bl body_set_gamma\n"
+        "    sub sp, fp, #28\n"
+        "    pop {r4, r5, r6, r7, r8, sl, fp, pc}\n");
+
+int     fw_write_i2c(void *logic, uint16_t reg, uint16_t value) __asm__(WRITE_I2C);
+int     fw_support_option(void *self, int option, bool *supported) __asm__(SUPPORT_OPTION);
+uint8_t MDrv_PNL_SetGammaTbl(int lut_type, uint8_t **gamma_tab, int map_mode);
 
 void *vtable_logic_fhd[49] __asm__("_ZTV8LogicFHD") __attribute__((section(".fw.logic_fhd_vtable")));
 void *logic_ic __asm__("_ZN8TDcLogic11m_poLogicICE") __attribute__((section(".fw.logic_ic")));
 
-enum { DRIVE = 0x806f, DEEP_BLACK = 0x809c, PEAK_STRETCH = 0x8063, DUTY2 = 0x89da, SUB_CONTRAST = 0x8927, OTHER = 0x803d };
+enum {
+    DRIVE = 0x806f,
+    DEEP_BLACK = 0x809c,
+    PEAK_STRETCH = 0x8063,
+    APC_OFFSET = 0x89c0,
+    DUTY2 = 0x89da,
+    SUB_CONTRAST = 0x8927,
+    OTHER = 0x803d
+};
 
 static struct { void *vptr; } g_logic = { &vtable_logic_fhd[2] };
 static _Atomic uint16_t      g_panel[0x10000];
 static pthread_mutex_t       g_bus = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t               g_gamma_hw[3][386];
+static int                   g_gamma_calls;
+
+uint8_t body_set_gamma(int lut_type, uint8_t **gamma_tab, int map_mode)
+{
+    (void)lut_type;
+    if (map_mode == 1 && gamma_tab) {
+        for (int ch = 0; ch < 3; ch++)
+            memcpy(g_gamma_hw[ch], gamma_tab[ch], 386);
+    }
+    g_gamma_calls++;
+    return 1;
+}
 
 int body_write_i2c(void *logic, uint16_t reg, uint16_t value)
 {
@@ -186,6 +220,34 @@ static bool hooked(void *function)
     return *(uint32_t *)function != 0xe92d48f0;
 }
 
+static bool gamma_hooked(void)
+{
+    return *(uint32_t *)(void *)MDrv_PNL_SetGammaTbl != 0xe92d4df0;
+}
+
+static uint16_t gamma_entry(const uint8_t *buf, int idx)
+{
+    if (idx == 256)
+        return (uint16_t)((buf[384] & 0x0fu) | ((uint16_t)buf[385] << 4));
+    const uint8_t *s = buf + 3 * (idx / 2);
+    return (idx & 1) ? (uint16_t)((s[0] >> 4) | ((uint16_t)s[2] << 4))
+                     : (uint16_t)((s[0] & 0x0fu) | ((uint16_t)s[1] << 4));
+}
+
+static void pack_ramp(uint8_t buf[386], uint16_t max_val)
+{
+    for (int k = 0; k < 128; k++) {
+        uint16_t v0 = (uint16_t)(((uint32_t)(2 * k) * max_val + 127) / 255);
+        uint16_t v1 = (uint16_t)(((uint32_t)(2 * k + 1) * max_val + 127) / 255);
+        buf[3 * k]     = (uint8_t)((v0 & 0x0fu) | ((v1 & 0x0fu) << 4));
+        buf[3 * k + 1] = (uint8_t)(v0 >> 4);
+        buf[3 * k + 2] = (uint8_t)(v1 >> 4);
+    }
+    /* Deliberately leave bytes 384..385 garbage, like Samsung's SdDisplay_SetPictureQuality. */
+    buf[384] = 0xaa;
+    buf[385] = 0x55;
+}
+
 static bool wb10p(void)
 {
     bool supported = false;
@@ -275,12 +337,20 @@ static void test_pdptune(const char *libpath)
     CHECK(g_panel[DRIVE] == 0x11 && hooked(fw_write_i2c) && wb10p());
 
     puts("a new configuration replaces the old one");
+    fw_write_i2c(&g_logic, APC_OFFSET, 0);
     inject("DEEPBLACK:ON PEAKSTRETCH:ON DUTY2:139 SUBCONTRAST:132 DUMP");
     EVENTUALLY(g_panel[SUB_CONTRAST] == 0x0840 && !hooked(fw_support_option));
     CHECK(g_panel[DRIVE] == 0x05 && g_panel[DEEP_BLACK] == 3 && g_panel[PEAK_STRETCH] == 1 && g_panel[DUTY2] == 139);
     CHECK(hooked(fw_write_i2c) && !wb10p());
     fw_write_i2c(&g_logic, DUTY2, 0);
     CHECK(g_panel[DUTY2] == 0);
+    fw_write_i2c(&g_logic, DUTY2, 0x80);
+    CHECK(g_panel[DUTY2] == 139);
+    /* Thermal / Eco / Cell Light < 20 dimming (APC_OFFSET > 0) holds duty_2 at stock 128. */
+    fw_write_i2c(&g_logic, APC_OFFSET, 50);
+    fw_write_i2c(&g_logic, DUTY2, 0x80);
+    CHECK(g_panel[DUTY2] == 0x80);
+    fw_write_i2c(&g_logic, APC_OFFSET, 0);
     fw_write_i2c(&g_logic, DUTY2, 0x80);
     CHECK(g_panel[DUTY2] == 139);
     fw_write_i2c(&g_logic, DEEP_BLACK, 0);
@@ -295,6 +365,39 @@ static void test_pdptune(const char *libpath)
     EVENTUALLY(!hooked(fw_write_i2c));
     CHECK(g_panel[DRIVE] == 0x05 && g_panel[DEEP_BLACK] == 0 && g_panel[PEAK_STRETCH] == 1);
     CHECK(g_panel[DUTY2] == 0x80 && g_panel[SUB_CONTRAST] == 0x0800 && !hooked(fw_support_option));
+
+    puts("opt-in 12-bit gamma LUT composes onto firmware table and restores on OFF");
+    CHECK(!gamma_hooked());
+    inject("GAMMA:BT1886");
+    EVENTUALLY(gamma_hooked());
+    uint8_t stock_r[386], stock_g[386], stock_b[386];
+    pack_ramp(stock_r, 4095);
+    pack_ramp(stock_g, 3900); /* Warm2-style channel scaling must be preserved at peak */
+    pack_ramp(stock_b, 3500);
+    uint8_t *stock_ptrs[3] = { stock_r, stock_g, stock_b };
+    int      before = g_gamma_calls;
+    CHECK(MDrv_PNL_SetGammaTbl(1, stock_ptrs, 1) == 1 && g_gamma_calls == before + 1);
+    CHECK(gamma_entry(g_gamma_hw[0], 0) == 0 && gamma_entry(g_gamma_hw[0], 255) == 4095);
+    CHECK(gamma_entry(g_gamma_hw[1], 255) == 3900 && gamma_entry(g_gamma_hw[2], 255) == 3500);
+    CHECK(gamma_entry(g_gamma_hw[0], 256) == 4095 && gamma_entry(g_gamma_hw[1], 256) == 3900);
+    /* BT.1886 lifts near-black out of plasma MLL (entry 5 > linear 80) and deepens midtones (entry 128 < 2056). */
+    CHECK(gamma_entry(g_gamma_hw[0], 5) > gamma_entry(stock_r, 5));
+    CHECK(gamma_entry(g_gamma_hw[0], 128) < gamma_entry(stock_r, 128));
+
+    /* Live switch to GAMMA:2.4 immediately re-applies to the captured stock LUT. */
+    before = g_gamma_calls;
+    inject("GAMMA:2.4");
+    EVENTUALLY(g_gamma_calls == before + 1);
+    CHECK(gamma_entry(g_gamma_hw[0], 5) < gamma_entry(stock_r, 5));
+    CHECK(gamma_entry(g_gamma_hw[0], 255) == 4095 && gamma_entry(g_gamma_hw[0], 256) == 4095);
+
+    /* OFF restores the exact stock LUT (with clean entry 256) and unhooks SetGammaTbl. */
+    before = g_gamma_calls;
+    inject("OFF");
+    EVENTUALLY(!gamma_hooked());
+    CHECK(g_gamma_calls == before + 1);
+    CHECK(memcmp(g_gamma_hw[0], stock_r, 384) == 0 && memcmp(g_gamma_hw[1], stock_g, 384) == 0);
+    CHECK(gamma_entry(g_gamma_hw[2], 256) == 3500);
 
     puts("hooks come and go under load");
     pthread_t threads[3];

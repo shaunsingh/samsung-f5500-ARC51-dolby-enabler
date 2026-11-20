@@ -10,7 +10,7 @@ Two [SamyGO](https://forum.samygo.tv/) payloads for 2013 Samsung F-series TVs wi
 Both are injected into the running `exeTV` process by `samyGOso` from a SamyGO USB stick. **Nothing is written to the TV's flash**: without the stick the TV is stock.
 
 ```text
-src/       libDDCRAM_EDID.c, libPDPTune.c, samygo.h
+src/       libDDCRAM_EDID.c, libPDPTune.c, gamma_tables.h, samygo.h
 init/      boot scripts for the stick
 scripts/   patch_edid_51.py, which adds 5.1 audio to dumped EDIDs
 test/      a stand-in exeTV that the libraries are tested against under qemu
@@ -121,21 +121,22 @@ The words of one injection are the whole configuration. What is not named goes b
 | `DRIVE:STANDARD` | In 2D, the firmware gives the logic board driving mode `0x05` for the Movie and Relax picture modes and `0x11` for Dynamic, Standard and Natural (register `0x806f`). This sends `0x11` wherever the firmware asks for `0x05`. Nothing else about Movie mode changes. |
 | `DEEPBLACK:ON` / `OFF` | Holds the logic board's DeepBlack register (`0x809c`) at `3` or at `0`. |
 | `PEAKSTRETCH:ON` / `OFF` | Holds its PeakStretch register (`0x8063`) at `1` or at `0`. |
-| `DUTY2:<79..160>` | Replaces the constant `128` this panel gets in register `0x89da` whenever it is lit. |
-| `SUBCONTRAST:<100..160>` | Replaces the factory *Sub Contrast* (`128` here; register `0x8927` holds it times 16). |
-| `OFF` | Nothing: the registers get the firmware's values back and the hooks are removed. |
-| `DUMP` | Logs the registers involved and the panel temperature. Changes nothing and can be combined with the others. |
+| `DUTY2:<79..160>` | Replaces the constant `128` this panel gets in register `0x89da` whenever it is lit. Boosts above `128` apply only while `APC_OFFSET` (`0x89c0`) is `0` (full Cell Light 20 with no Eco or thermal dimming). |
+| `SUBCONTRAST:<100..160>` | Replaces *Sub Contrast* (register `0x8927` holds the service-menu value times 16). Factory values on this set: `128` in Movie (`MSub Contrast`), `132` in Dynamic/Standard/Natural (`Sub Contrast`). |
+| `GAMMA:TOE` / `2.3` / `2.4` / `BT1886` | Opt-in 12-bit hardware EOTF curve composed onto `exeTV`'s R/G/B gamma LUT inside `MDrv_PNL_SetGammaTbl` (`libUTOPIA.so`). Preserves Warm2 and 2p/10p White Balance, keeps black at `0` and peak unclipped, and initializes the 257th guard entry (`entry[256] = entry[255]`) that `SdDisplay_SetPictureQuality` leaves unset. Not hooked unless requested. |
+| `OFF` | Nothing: the registers and gamma LUT get the firmware's values back and all hooks are removed. |
+| `DUMP` | Logs the hook states, gamma state, registers involved and panel temperature. Changes nothing and can be combined with the others. |
 
 The boot script's default is `UNLOCK DRIVE:STANDARD`.
 
-**What is known and what is not.** The register addresses, the values the firmware sends and when it sends them were read from the disassembly of `exeTV`. What the logic board does with them is not documented, and nothing here has been measured with a meter. In particular:
+**What is known and what is not.** The register addresses, the values the firmware sends and when it sends them were read from the disassembly of `exeTV`, `libSDAL.so` and `libUTOPIA.so`. What the logic board does with them is not documented, and nothing here has been measured with a meter. In particular:
 
-- The firmware's *Black Optimizer* code writes DeepBlack and PeakStretch as a pair: `0` and `0` for Off, `3` and `0` for Dark Room, `0` and `1` for Bright Room. On the test set, though, the logic board comes up with DeepBlack `3` and PeakStretch `1` at every start and the firmware leaves them there. `ON` is therefore what this set already does, and `OFF` is the experiment.
-- `128` is the highest `duty_2` the firmware sends to any panel type, and `128` is the factory *Sub Contrast*. Higher values are outside what Samsung shipped.
+- The firmware's *Black Optimizer* code writes DeepBlack and PeakStretch as a pair: `0` and `0` for Off, `3` and `0` for Dark Room, `0` and `1` for Bright Room. On the test set, though, the logic board comes up with DeepBlack `3` and PeakStretch `1` at every start and the firmware leaves them there (`BLACK_OPTIMIZER = 3` in NVRAM skips writing either register). `ON` is therefore what this set already does, and `OFF` is the experiment.
+- `128` is the highest `duty_2` the firmware sends to any panel type; higher values are outside what Samsung shipped, so boosts above `128` are automatically held back whenever `APC_OFFSET` (`0x89c0`) is non-zero.
+- `SUBCONTRAST:132` matches the factory *Sub Contrast* Samsung ships for Standard mode on this panel (`132` vs `128` in Movie mode). Values above `132` are outside what Samsung shipped.
+- `GAMMA:*` hooks `MDrv_PNL_SetGammaTbl` (called by `PrimePictureShare::m_PrimePicture_SetGamma` / `SetGamma10PWB` via `SdDisplay_SetPictureQuality` -> `g_IPanel->SetGammaTbl` -> `MDrv_PNL_SetGammaTbl(1, ptrs, 1)` -> `Hal_PNL_Set12BitGammaPerChannel`). `BT1886` targets ITU-R BT.1886 for a 5000:1 plasma (lifting 1–5% out of the plasma black floor while tracking 2.4 above); `TOE` deepens only 0–20% IRE without touching midtones or peak white. Because it composes onto `exeTV`'s real table rather than synthesizing a ramp, enabling `GAMMA:*` after boot takes effect on the next firmware gamma load (e.g. toggling Gamma or Picture Mode once, or switching inputs); subsequent switches between presets or `OFF` apply immediately.
 
-Treat `DEEPBLACK`, `PEAKSTRETCH`, `DUTY2` and `SUBCONTRAST` as experiments: change one at a time, compare by eye or with a meter, and keep what holds up. More light means more power, heat and wear on a plasma panel. None of this outlasts a restart of the TV.
-
-The library does not touch the video processor: no gamma tables, no sharpening, no colour processing.
+Treat `DEEPBLACK`, `PEAKSTRETCH`, `DUTY2`, `SUBCONTRAST` and `GAMMA` as experiments: change one at a time, compare by eye or with a meter, and keep what holds up. More light means more power, heat and wear on a plasma panel. None of this outlasts a restart of the TV.
 
 ### Installation
 
@@ -160,24 +161,26 @@ cat /dtv/PDPTune.log
 ```
 
 ```text
-libPDPTune 2.0.0: UNLOCK DRIVE:STANDARD DEEPBLACK:ON DUMP
+libPDPTune 2.1.0: UNLOCK DRIVE:STANDARD SUBCONTRAST:132 DUMP
 LogicFHD::m_Logic_WriteI2C hooked
 DrivingMode 0x806f: firmware 0x0005, panel 0x0011
 DeepBlack   0x809c: firmware 0x0003, panel 0x0003
 PeakStretch 0x8063: firmware 0x0001, panel 0x0001
 duty_2      0x89da: firmware 0x0080, panel 0x0080
-SubContrast 0x8927: firmware 0x0800, panel 0x0800
+SubContrast 0x8927: firmware 0x0800, panel 0x0840
 PrdInfoManager::CheckSupportOption hooked
 dump LogicFHD::m_Logic_WriteI2C is hooked
 dump PrdInfoManager::CheckSupportOption is hooked
+dump MDrv_PNL_SetGammaTbl is not hooked
+dump gamma mode NONE (stock LUT not captured)
 dump DrivingMode 0x806f = 0x0111
 dump DeepBlack   0x809c = 0x0003
 dump PeakStretch 0x8063 = 0x0001
 dump duty_2      0x89da = 0x0080
-dump SubContrast 0x8927 = 0x0800
+dump SubContrast 0x8927 = 0x0840
 dump APC offset  0x89c0 = 0x0000
 dump SubBright   0x8926 = 0x0450
-dump panel temperature 43 C
+dump panel temperature 46 C
 done
 ```
 
@@ -186,7 +189,7 @@ The first block gives, per register, what the firmware last asked for (or, befor
 ### How it works
 
 - **Finding things.** `exeTV` is not position independent and exports its C++ symbols, so the library looks each one up with `dlsym` and requires the address it expects. The logic board object comes from the exported `TDcLogic::m_poLogicIC`, and its vtable pointer must be that of `LogicFHD`.
-- **Hooks.** The first instruction of `LogicFHD::m_Logic_WriteI2C` and of `PrdInfoManager::CheckSupportOption` is replaced by a branch. That is one aligned word, so a thread entering the function sees either the old instruction or the new one, and hooks can be set and removed while `exeTV` runs. A branch reaches 32 MiB and libraries are mapped much further away, so it lands on a small stub in a page mapped into the gap between the segments of `exeTV`, which jumps on to the library. Before patching or restoring, the library checks that the word it is about to replace is the one it expects.
+- **Hooks.** The first instruction of `LogicFHD::m_Logic_WriteI2C`, `PrdInfoManager::CheckSupportOption`, and (only when `GAMMA:*` is requested) `MDrv_PNL_SetGammaTbl` is replaced by a branch. That is one aligned word, so a thread entering the function sees either the old instruction or the new one, and hooks can be set and removed while `exeTV` runs. A branch reaches 32 MiB and libraries are mapped much further away, so it lands on a small stub in a page mapped into a gap near `exeTV` (or near `libUTOPIA.so` for gamma), which jumps on to the library. Before patching or restoring, the library checks that the word it is about to replace is the one it expects.
 - **Overrides.** The firmware rewrites these registers whenever the picture mode, *Black Optimizer* or *Cell Light* changes, so the override sits in the write path. The library remembers what the firmware last asked for, which is what it restores when an override is dropped.
 - **Threads.** `samyGOso` borrows a thread of `exeTV` wherever that thread happens to be, possibly inside a firmware lock. The library therefore does its work on a thread of its own.
 

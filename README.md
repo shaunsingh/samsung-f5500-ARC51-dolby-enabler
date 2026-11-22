@@ -1,18 +1,20 @@
 # Samsung F5500 ARC 5.1 and plasma tuning
 
-[SamyGO](https://forum.samygo.tv/) payloads for a 2013 Samsung F-series plasma, developed on a **PN60F5500AF** running firmware **T-MST12AKUC-2225.0**. Both are injected into the running `exeTV` process from a SamyGO USB stick. Nothing is written to the TV's flash: without the stick, the TV is stock.
+[SamyGO](https://forum.samygo.tv/) payloads for a 2013 Samsung F-series plasma, developed on a **PN60F5500AF** running firmware **T-MST12AKUC-2225.0**. These payloads are injected into the running `exeTV` process from a SamyGO USB stick. Nothing is written to the TV's flash: without the stick, the TV is stock.
 
 | Component | What it does | Works on |
 |---|---|---|
 | **`libDDCRAM_EDID`** | Makes HDMI sources offer **Dolby Digital 5.1** and **DTS 5.1**, which the TV passes to an HDMI-ARC or optical receiver. No EDID emulator or audio extractor is required. | F-series `T-MST12` firmware that exports the MStar functions in [the firmware notes](docs/firmware-reference.md) |
 | **`libPDPTune`** | Unlocks **10-point White Balance**, **Color Space → Custom**, and **Expert Pattern**, and can override plasma drive, Deep Black, Peak Stretch, duty, Sub Contrast, and the 12-bit gamma curve (`BT1886`, `2.4`, `2.3`, `TOE`). | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`. Any other firmware is left alone. |
+| **`libArcToggle`** | One remote key swaps **PCM** and **Dolby Digital** on the SPDIF/ARC output, the same setting as Sound → Audio Format. | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`. Any other firmware is left alone. |
 
 ## Repository layout
 
 ```text
-src/            libDDCRAM_EDID.c, libPDPTune.c, libCMSApply.c, libCMProbe.c,
-                libCMFactory.c, libHPD.c, libAudioProbe.c, gamma_tables.h, samygo.h
-init/           boot scripts for the EDID patch and libPDPTune
+src/            libDDCRAM_EDID.c, libPDPTune.c, libArcToggle.c, libCMSApply.c,
+                libCMProbe.c, libCMFactory.c, libHPD.c, libAudioProbe.c,
+                gamma_tables.h, samygo.h
+init/           boot scripts for the EDID patch, libPDPTune, and libArcToggle
 scripts/        patch_edid_51.py, gamma_curves.py, gamut/, re/
 test/           fake_exetv.c, the QEMU stand-in for the two boot payloads
 prebuilt/       the built libraries
@@ -100,12 +102,57 @@ Leave the source in its normal limited RGB range, with the TV's HDMI black level
 
 ### Audio limitations
 
-- Content-aware automatic switching is not implemented. Beam has no input-format override, and Samsung exposes only stereo PCM capture and stereo level reporting, not the six decoded channels needed to detect surround activity inside a DD 5.1 container. A clean implementation would require a new multichannel decoder/DSP tap and a hysteretic PCM/bitstream router.
+- Content-aware automatic switching is not implemented. Beam has no input-format override, and Samsung exposes only stereo PCM capture and stereo level reporting, not the six decoded channels needed to detect surround activity inside a DD 5.1 container. A clean implementation would require a new multichannel decoder/DSP tap and a hysteretic PCM/bitstream router. The remote toggle below is the manual switch.
 - Because the source format is global, stereo programmes are re-encoded into Dolby Digital when the source is set to Dolby Digital. They are not passed as stereo PCM for the receiver to upmix.
 - DTS 5.1 is advertised and selected the same way. Playback was not checked on a receiver that only decodes Dolby Digital.
 - This path does not carry multichannel LPCM, Dolby Digital Plus, TrueHD/Atmos, DTS-HD, or eARC.
 
 The checks behind those limits are in [validation](docs/validation.md).
+
+## Remote PCM / Dolby Digital toggle
+
+`libArcToggle` calls the same function as **Sound → Additional Settings → SPDIF Output → Audio Format**. PCM is `0` and Dolby Digital is `1`. The call uses query `0`, which is the path that programs the output. A different firmware is logged and left unchanged.
+
+The live command is the first byte of the buffer passed to `TDcPrimeMicomInterface::t_ParsePacket`. On this set that byte is `0x50` for the DVR button. The same command also arrives when the button is not pressed, and arming it flips PCM and Dolby during playback, so the boot configuration does not arm a key. With no words the payload only logs presses. `KEY:` arms the toggle. A held key repeats. The payload toggles once per press and swallows every repeat of the armed key, so a hold does not also open a menu.
+
+Playback of the switch on a receiver has not been checked. The log shows the menu value before and after the call. If that value changes and the bitstream does not, the output refresh is a separate step.
+
+### Installation
+
+Copy `prebuilt/libArcToggle.so` to `/mnt/opt/privateer/usr/libso/` and `init/99_93_ArcToggle.init` to `/mnt/etc/init.d/` (`chmod 755`).
+
+With no words, the boot script logs commands and does not toggle. `/mnt/opt/privateer/usr/libso/libArcToggle.conf` replaces that. One or more words per line. On this set the DVR button is `KEY:0x50`. An empty `STOP_ARCTOGGLE` or `STOP` in the root of the stick skips the script.
+
+### Options
+
+| Option | What it does |
+|---|---|
+| *(none)* / `LOG` | Hooks the remote and appends each key id to the log. Does not toggle. |
+| `KEY:N` | Toggles on that key id. `0x` is hex; a bare number is decimal. `1`–`255`. |
+| `PCM` / `DD` / `TOGGLE` | Sets PCM, sets Dolby Digital, or swaps once. Does not hook the remote unless a hook option is present. `DOLBY` is the same as `DD`. |
+| `OFF` | Removes the hook. It accepts no other word. |
+
+A bad word is reported and the whole injection is ignored. Injecting again changes the key and the log switch without installing a second hook.
+
+### Find the button, then arm it
+
+```sh
+. /dtv/SGO.env
+samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so LOG
+# press the button once
+cat /dtv/ArcToggle.log
+samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so KEY:111
+cat /dtv/ArcToggle.log
+```
+
+On this set the DVR button is command `0x50`. Use the command `LOG` printed. To try the switch before a button is known:
+
+```sh
+samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libArcToggle.so TOGGLE
+cat /dtv/ArcToggle.log
+```
+
+The log is `/dtv/ArcToggle.log`. A line like `PCM -> Dolby set=1 now=Dolby` means the menu value changed. On this firmware the call returns 1. `set=` is that return code.
 
 ## Plasma picture tuning
 
@@ -214,9 +261,10 @@ make prebuilt
 
 ## Disable or revert
 
-- `STOP_EDID` skips the EDID boot script. `STOP_PDPTUNE` skips the picture boot script. `STOP` skips both.
+- `STOP_EDID` skips the EDID boot script. `STOP_PDPTUNE` skips the picture boot script. `STOP_ARCTOGGLE` skips the audio-key boot script. `STOP` skips all three.
 - `STOP_SAMYGO`, or booting with no stick, starts the TV stock.
 - `samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libPDPTune.so OFF` removes the picture hooks on a running TV.
+- `samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so OFF` removes the audio-key hook on a running TV.
 - Without the EDID boot script, the stereo EDIDs return at the next power-on.
 
 ## License

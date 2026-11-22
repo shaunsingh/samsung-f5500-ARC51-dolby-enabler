@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# Loads libArcToggle into exeTV at boot, and into exeAPP so the DVR button
+# does not raise the universal-remote setup prompt. With no words the exeTV
+# copy logs key ids and does not toggle. Words in libArcToggle.conf next to
+# the library replace that, for example KEY:0x50. '#' starts a comment. An
+# empty STOP or STOP_ARCTOGGLE file in the root of the stick skips it. The
+# README explains LOG, KEY, PCM, DD, TOGGLE and OFF.
+#
+# shellcheck source=/dev/null
+. /dtv/SGO.env
+
+LIB="${LIBSO_DIR:-$SYSROOT/opt/privateer/usr/libso}/libArcToggle.so"
+CONF="${LIB%.so}.conf"
+LOG=/dtv/ArcToggle.log
+OPTIONS=""
+
+case $1 in
+	start)
+	for usb in /dtv/usb/sd*; do
+		if [ -e "$usb/STOP" ] || [ -e "$usb/STOP_ARCTOGGLE" ]; then
+			echo "STOP file found, audio key left alone."
+			exit 0
+		fi
+	done
+	if [ -f "$LIB" ] && pidof exeTV > /dev/null; then
+		cr=$(printf '\r')
+		[ -f "$CONF" ] && OPTIONS=$(sed "s/#.*//; s/$cr//" "$CONF")
+		rm -f "$LOG"
+		# One argument per word. Empty OPTIONS arms the default key.
+		# shellcheck disable=SC2086
+		samyGOso -T -B -r -l "$LIB" $OPTIONS
+		i=0
+		while [ "$i" -lt 5 ]; do
+			pidof exeAPP > /dev/null && break
+			i=$((i + 1))
+			sleep 1
+		done
+		if pidof exeAPP > /dev/null; then
+			samyGOso -n exeAPP -B -r -l "$LIB"
+		fi
+	fi
+	;;
+	stop)
+	;;
+	status)
+	cat "$LOG" 2> /dev/null || echo "Not started"
+	;;
+	*)
+	echo "Usage: $0 {start|stop|status}" >&2
+	;;
+esac

@@ -81,6 +81,16 @@ The hook preserves 2-point and 10-point white balance, keeps black at zero and p
 
 At OSD Gamma `0`, the observed firmware LUT is approximately linear. Curve selection assumes approximately 2.2 native panel response above the black floor. `2.4` is the zero-black limit of BT.1886; `TOE` changes only the low end. These assumptions require optical verification.
 
+## SPDIF audio format and the remote key
+
+`libArcToggle` uses the menu setter, not a speaker-object call. `TCSpeakerImpl::SetExternalOutMode` (`_ZN13TCSpeakerImpl18SetExternalOutModeEii`, `0x00af9a1c`) ignores its receiver, takes `TCExternalOutInfo` for output 0, and calls virtual `+0x10`. The read is `GetExternalOutMode` at `0x00af9a74`. `TPCExternalOut::EAudioType` is 0 PCM, 1 Dolby Digital, 2 DTS, 3 DTS Neo:6.
+
+That path reaches `ExternalOutControl::SetAudioMode` (`0x008c0e98`). The third argument is `TPCTv::EQueryType`. Query 0 programs the processor. Any other query returns without writing the hardware, so the hotkey passes 0.
+
+`SpeakerControl::SetSPDIFAudioFormat` (`0x0096aa44`) is a different object. `TPCSpeaker::Instance` returns a 0x14-byte `TPASpeaker`, whose vtable has delay and support flags and does not have that function. Calling it there would crash `exeTV`. The payload does not.
+
+`KeyInputBase::t_ProcessKeyValue` (`0x009038bc`), `KeyCommon::SendKeyPressInput` (`0x009004b0`), and `CInputHandler::t_OnEvent` (`0x016a75ec`) are not called when this remote is pressed. `t_ProcessNormalBuf` carries the brightness sensor (`da 14`, `da 15`, `da 16`). The remote command is the first byte of the buffer passed to `TDcPrimeMicomInterface::t_ParsePacket` (`0x011106b4`). On this set the DVR button is command `0x50`. That command also arrives while the button is idle. An armed toggle therefore changes the format during playback, with no press. Swallowing `t_ParsePacket` does not stop the universal-remote setup dialog; that text is drawn in `exeAPP`.
+
 ## Audio capture and content-aware routing
 
 `libSDAL.so` exports `SdSound_InstallCallbackPCMCapture` and related capture functions. `AU_PcmCapture_Init` configures two 16-bit capture channels and two `0x1000`-byte buffers. `MApi_AUDIO_SST_GetLevel` likewise exposes left/right levels, not six decoded channels.

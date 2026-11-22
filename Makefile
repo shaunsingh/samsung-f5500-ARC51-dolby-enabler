@@ -12,8 +12,8 @@ NM    := $(CROSS)nm
 STRIP := $(CROSS)strip
 QEMU  ?= qemu-arm -L /usr/$(CROSS:-=)
 
-LIBS := build/libDDCRAM_EDID.so build/libPDPTune.so build/libCMSApply.so \
-        build/libCMProbe.so build/libCMFactory.so build/libHPD.so build/libAudioProbe.so
+LIBS := build/libDDCRAM_EDID.so build/libPDPTune.so build/libArcToggle.so \
+        build/libCMSApply.so build/libCMProbe.so build/libCMFactory.so build/libHPD.so build/libAudioProbe.so
 ARCH := -march=armv7-a -marm -mfloat-abi=soft
 WARN := -std=gnu11 -Wall -Wextra -Werror
 
@@ -23,8 +23,9 @@ WARN := -std=gnu11 -Wall -Wextra -Werror
 CFLAGS  := $(ARCH) $(WARN) -O2 -fPIC -fvisibility=hidden -fno-stack-protector -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
 LDFLAGS := -shared -nostdlib -Wl,--hash-style=both
 
-# libPDPTune leaves hooks and a thread behind, so it must never be unloaded.
+# These leave hooks and a thread behind, so they must never be unloaded.
 build/libPDPTune.so: LDFLAGS += -Wl,-z,nodelete
+build/libArcToggle.so: LDFLAGS += -Wl,-z,nodelete
 
 # What a payload may import: symbols the TV's libc, libdl and libpthread have.
 # The headers of a newer libc redirect some functions to symbols those lack

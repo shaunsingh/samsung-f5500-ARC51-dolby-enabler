@@ -429,7 +429,7 @@ async function oneClickRun() {
     }
 
     setStatus(abortSweep ? 'Stopped — restoring Live HDMI...' : 'All sweeps complete! Restoring Live HDMI...');
-    await tvApply('UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:168 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON', true);
+    await tvApply('UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:168 OSD_GAMMA:0 GAMMA:2.4', true);
     setStatus(abortSweep ? 'Stopped & Live HDMI restored.' : 'All done! Live HDMI restored — check NULL controls & curve!');
   } catch (e) {
     setStatus('Error: ' + e.message);

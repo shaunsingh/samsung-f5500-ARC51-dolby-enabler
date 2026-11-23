@@ -57,7 +57,7 @@ Symmetric `A → B → A` bracketed differential photometry (~0.85 s bracket wid
 | `DRIVE:STANDARD` + `DEEPBLACK_MODE:ON` (`128`) vs Stock Movie | `127.28%` | — | `+12.8%` over `DBM:OFF`, flicker-free at 60 Hz |
 | Full Tuned (`STD + DBM:ON + DUTY2:175–182`) vs Stock Movie | `176.7–181.1%` | — | **~+80% total full-field luminance over stock Movie** |
 
-Final persisted configuration (`UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:168 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON`) verified live: `0x806f = 0x0111`, `0x809c = 0x0003`, `0x8063 = 0x0001`, `0x80bf = 0x0001`, `0x8064 = 0x0000`, `0x89bf = 0x41ff`, `0x89c0 = 0x0000`, `0x89ee = 0x0000`, `0x89da = 0x00a8` (`168`), `0x8927 = 0x0840` (`132`), `0x8114 = 0x0000`, `mbrg_outputsource_setfilmmode` hooked (`CinemaSmooth = 1`), `OutputVFreq = 60.00 Hz`, 44 °C.
+Final persisted configuration (`UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:168 OSD_GAMMA:0 GAMMA:2.4`) verified live: `0x806f = 0x0111`, `0x809c = 0x0003`, `0x8063 = 0x0001`, `0x80bf = 0x0001`, `0x8064 = 0x0000`, `0x89bf = 0x41ff`, `0x89c0 = 0x0000`, `0x89ee = 0x0000`, `0x89da = 0x00a8` (`168`), `0x8927 = 0x0840` (`132`), `0x8114 = 0x0000`, `OutputVFreq = 60.00 Hz`, 44 °C. `CINEMA_SMOOTH:ON` was tested live (`mbrg_outputsource_setfilmmode` hooked, `0 -> 1`, `ok=1`) and left opt-in rather than forced globally because `Factory.log` shows `24Px4 Support = 1=ON` natively on 24 Hz inputs and forcing Cinema Smooth on 60 Hz sources can cause cadence stutter on F-series plasmas.
 
 ## Picture menu used with this configuration
 

@@ -47,7 +47,7 @@
 #include "gamma_tables.h"
 #include "samygo.h"
 
-#define VERSION  "2.5.0"
+#define VERSION  "2.5.1"
 #define LOG      "/dtv/PDPTune.log"
 #define say(...) sgo_log(LOG, __VA_ARGS__)
 
@@ -223,12 +223,13 @@ static uint16_t tuned(const struct knob *knob, uint16_t stock)
 #define INSN_B           0xea000000u
 #define BRANCH_REACH     0x02000000u
 
-enum { H_WRITE_I2C, H_SUPPORT_OPTION, H_SET_GAMMA, H_COUNT };
+enum { H_WRITE_I2C, H_SUPPORT_OPTION, H_SET_GAMMA, H_FILM_MODE, H_COUNT };
 enum { STUB_ENTRY = 0, STUB_RESUME = 2, STUB_WORDS = 5 };
 
 static write_i2c_fn      on_write_i2c;
 static support_option_fn on_support_option;
 static set_gamma_fn      on_set_gamma;
+static set_filmmode_fn   on_set_filmmode;
 
 static struct hook {
     const char *name;
@@ -240,13 +241,16 @@ static struct hook {
     uint32_t   *stub;
     bool        installed;
 } g_hooks[H_COUNT] = {
-    /* First two begin with push {r4, r5, r6, r7, fp, lr}; SetGammaTbl with push {r4..r8, sl, fp, lr}. */
+    /* First two begin with push {r4, r5, r6, r7, fp, lr}; SetGammaTbl with push {r4..r8, sl, fp, lr};
+     * mbrg_outputsource_setfilmmode begins with push {r4, r5, fp, lr} (0xe92d4830). */
     [H_WRITE_I2C]      = { "LogicFHD::m_Logic_WriteI2C", F_WRITE_I2C, NULL, 0, 0xe92d48f0,
                            (void (*)(void))on_write_i2c, NULL, false },
     [H_SUPPORT_OPTION] = { "PrdInfoManager::CheckSupportOption", F_SUPPORT_OPTION, NULL, 0, 0xe92d48f0,
                            (void (*)(void))on_support_option, NULL, false },
     [H_SET_GAMMA]      = { "MDrv_PNL_SetGammaTbl", -1, "MDrv_PNL_SetGammaTbl", 0, 0xe92d4df0,
                            (void (*)(void))on_set_gamma, NULL, false },
+    [H_FILM_MODE]      = { "mbrg_outputsource_setfilmmode", -1, "_Z29mbrg_outputsource_setfilmmodeh", 0, 0xe92d4830,
+                           (void (*)(void))on_set_filmmode, NULL, false },
 };
 
 /*
@@ -314,7 +318,7 @@ static bool hook_prepare(struct hook *hook)
         return false;
 
     size_t size = (size_t)sysconf(_SC_PAGESIZE);
-    if (hook == &g_hooks[H_SET_GAMMA]) {
+    if (hook->function < 0) {
         uint32_t *page = map_stub_page(size, hook->addr, hook->addr);
         if (!page) {
             say("%s: no free page within branch reach", hook->name);
@@ -604,34 +608,59 @@ struct request {
     int  to[K_COUNT];
 };
 
+static int g_cinema_smooth_want = KEEP;
 static int g_cinema_smooth_stock = UNKNOWN;
+
+static uint8_t on_set_filmmode(uint8_t enable)
+{
+    set_filmmode_fn *original = (set_filmmode_fn *)(g_hooks[H_FILM_MODE].stub + STUB_RESUME);
+    int              want = __atomic_load_n(&g_cinema_smooth_want, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&g_cinema_smooth_stock, enable ? 1 : 0, __ATOMIC_RELEASE);
+    uint8_t actual = want == KEEP ? enable : (uint8_t)want;
+    return original(actual);
+}
 
 static void apply_cinema_smooth(int want, bool restore_if_off)
 {
-    int target = want;
-    if (target == KEEP && restore_if_off && g_cinema_smooth_stock != UNKNOWN)
-        target = g_cinema_smooth_stock;
-    if (target == KEEP)
-        return;
-
     get_filmmode_fn *get_fm = (get_filmmode_fn *)dlsym(RTLD_DEFAULT, "_Z29mbrg_outputsource_getfilmmodev");
     set_filmmode_fn *set_fm = (set_filmmode_fn *)dlsym(RTLD_DEFAULT, "_Z29mbrg_outputsource_setfilmmodeh");
     if (!get_fm || !set_fm) {
-        say("CinemaSmooth unavailable (mbrg_outputsource_setfilmmode not exported)");
+        if (want != KEEP)
+            say("CinemaSmooth unavailable (mbrg_outputsource_setfilmmode not exported)");
         return;
     }
+
+    int target = want;
+    pthread_mutex_lock(&g_lock);
+    int stock = __atomic_load_n(&g_cinema_smooth_stock, __ATOMIC_ACQUIRE);
+    if (want == KEEP) {
+        if ((restore_if_off || g_hooks[H_FILM_MODE].installed) && stock != UNKNOWN)
+            target = stock;
+        __atomic_store_n(&g_cinema_smooth_want, KEEP, __ATOMIC_RELEASE);
+        hook_set(&g_hooks[H_FILM_MODE], false);
+        if (restore_if_off || target != KEEP)
+            __atomic_store_n(&g_cinema_smooth_stock, UNKNOWN, __ATOMIC_RELEASE);
+    } else {
+        if (stock == UNKNOWN)
+            __atomic_store_n(&g_cinema_smooth_stock, get_fm() ? 1 : 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_cinema_smooth_want, want, __ATOMIC_RELEASE);
+        hook_set(&g_hooks[H_FILM_MODE], true);
+    }
+    set_filmmode_fn *call_fn = g_hooks[H_FILM_MODE].installed
+                                   ? (set_filmmode_fn *)(g_hooks[H_FILM_MODE].stub + STUB_RESUME)
+                                   : set_fm;
+    pthread_mutex_unlock(&g_lock);
+
+    if (target == KEEP)
+        return;
     int cur = get_fm() ? 1 : 0;
-    if (g_cinema_smooth_stock == UNKNOWN)
-        g_cinema_smooth_stock = cur;
     if (cur != target) {
-        uint8_t ok = set_fm((uint8_t)target);
+        uint8_t ok = call_fn((uint8_t)target);
         int     now = get_fm() ? 1 : 0;
         say("CinemaSmooth (24p->48Hz): %d -> %d (ok=%u now=%d)", cur, target, (unsigned)ok, now);
     } else {
         say("CinemaSmooth (24p->48Hz): already %d", cur);
     }
-    if (restore_if_off)
-        g_cinema_smooth_stock = UNKNOWN;
 }
 
 /*
@@ -810,7 +839,7 @@ static void *worker(void *arg)
             if (g_gamma_mode != GAMMA_NONE && g_gamma_have_stock)
                 say("gamma %s applied to firmware LUT", g_gamma_names[g_gamma_mode]);
         }
-        if (request->configure && (request->cinema_smooth != KEEP || request->off)) {
+        if (request->configure && (request->cinema_smooth != KEEP || request->off || g_hooks[H_FILM_MODE].installed)) {
             int  cs = request->cinema_smooth;
             bool off = request->off;
             pthread_mutex_unlock(&g_lock);

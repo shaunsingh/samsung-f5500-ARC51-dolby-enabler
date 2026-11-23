@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-optical_sweep.py - Hands-free live-video smartphone photometer & automated
-optical sweep controller for Samsung PN60F5500 (libPDPTune 2.5.0).
+optical_sweep.py - Metrology-grade hands-free smartphone photometer for
+Samsung PN60F5500 (libPDPTune 2.5.0).
 
-Uses Full-Field White (PATTERN:WHITE, 0x8114=0x0101) so smartphone cameras
-meter cleanly in the linear mid-range (~140-210 sRGB, zero sensor clipping),
-with a median-filtered post-transition window (tDone+60ms..tDone+360ms) that
-rejects both 1-frame LogicFHD blanking and 60Hz/600Hz plasma rolling-shutter
-beat. Runs 2 passes per step and reports mean +/- spread.
+Cancels both 59.94Hz/30Hz plasma rolling-shutter beating (~0.06 Hz) and slow
+camera auto-exposure drift via tight symmetric A -> B -> A bracketing:
+
+    ratio = Y_B / (0.5 * (Y_A_before + Y_A_after))
+
+Includes explicit NULL (A -> A) control steps at the start and end of each
+sweep to prove the real measurement noise floor before drawing conclusions.
 """
 import argparse
 import json
@@ -24,7 +26,7 @@ from urllib.parse import urlparse
 TV_HOST = ""
 TV_PORT = 23
 LIB_PATH = "/mnt/opt/privateer/usr/libso/libPDPTune.so"
-RESULTS_PATH = "/tmp/optical_sweep_results.json"
+RESULTS_PATH = "/tmp/optical_sweep_results_v3_fine.json"
 
 BASE_OPTS = (
     "UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON "
@@ -33,35 +35,42 @@ BASE_OPTS = (
 )
 
 SWEEPS = {
-    "duty2_full": {
-        "title": "1. DUTY2 Optical Curve (Full-Field White, 2x avg)",
-        "roi": "center",
-        "repeats": 2,
+    "duty2_fine": {
+        "title": "Fine Peak Zoom: DUTY2 160..195 (A->B->A + Nulls)",
+        "repeats": 3,
         "baseline_opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:128 PATTERN:WHITE",
         "steps": [
-            {"id": str(v), "x": v, "label": f"DUTY2:{v}",
-             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:{v} PATTERN:WHITE"}
-            for v in (128, 139, 155, 175, 195, 215, 235, 255)
+            {"id": "null1", "x": 152, "label": "NULL 128->128",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:128 PATTERN:WHITE"},
+            {"id": "160", "x": 160, "label": "DUTY2:160",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:160 PATTERN:WHITE"},
+            {"id": "168", "x": 168, "label": "DUTY2:168",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:168 PATTERN:WHITE"},
+            {"id": "175", "x": 175, "label": "DUTY2:175",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:175 PATTERN:WHITE"},
+            {"id": "182", "x": 182, "label": "DUTY2:182",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:182 PATTERN:WHITE"},
+            {"id": "188", "x": 188, "label": "DUTY2:188",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:188 PATTERN:WHITE"},
+            {"id": "195", "x": 195, "label": "DUTY2:195",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:195 PATTERN:WHITE"},
+            {"id": "null2", "x": 203, "label": "NULL 128->128",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:128 PATTERN:WHITE"},
         ],
     },
-    "modes_full": {
-        "title": "2. Drive / DeepBlackMode / PeakStretch / SubContrast (Full White)",
-        "roi": "center",
-        "repeats": 2,
+    "total_vs_stock": {
+        "title": "Total Gain vs Stock Movie (175 / 182 / 188)",
+        "repeats": 3,
         "baseline_opts": "UNLOCK SUBCONTRAST:128 DUTY2:128 OSD_GAMMA:0 GAMMA:2.4 PATTERN:WHITE",
         "steps": [
-            {"id": "movie_128", "x": 1, "label": "Stock Movie 128",
+            {"id": "null1", "x": 0, "label": "NULL Stock Movie",
              "opts": "UNLOCK SUBCONTRAST:128 DUTY2:128 OSD_GAMMA:0 GAMMA:2.4 PATTERN:WHITE"},
-            {"id": "std_128", "x": 2, "label": "DRIVE:STD 128",
-             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:128 PATTERN:WHITE"},
-            {"id": "std_200_dbm0", "x": 3, "label": "STD200 DBMode:0",
-             "opts": "UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:OFF POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4 PATTERN:WHITE"},
-            {"id": "std_200_dbm1", "x": 4, "label": "STD200 DBMode:1",
-             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:200 PATTERN:WHITE"},
-            {"id": "std_200_ps0", "x": 5, "label": "STD200 PeakStr:0",
-             "opts": "UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:OFF DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4 PATTERN:WHITE"},
-            {"id": "std_200_sub150", "x": 6, "label": "STD200 SubC:150",
-             "opts": f"{BASE_OPTS} SUBCONTRAST:150 DUTY2:200 PATTERN:WHITE"},
+            {"id": "opt_175", "x": 1, "label": "Full Tuned 175",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:175 PATTERN:WHITE"},
+            {"id": "opt_182", "x": 2, "label": "Full Tuned 182",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:182 PATTERN:WHITE"},
+            {"id": "opt_188", "x": 3, "label": "Full Tuned 188",
+             "opts": f"{BASE_OPTS} SUBCONTRAST:132 DUTY2:188 PATTERN:WHITE"},
         ],
     },
 }
@@ -161,7 +170,7 @@ def tv_apply(opts, with_dump=False):
         f"samyGOso -T -B -r -l \"$LIB\" {opts}{dump_tok} > /dev/null"
     )
     if with_dump:
-        cmd += "; sleep 0.5; cat /dtv/PDPTune.log"
+        cmd += "; sleep 0.4; cat /dtv/PDPTune.log"
     with TV_LOCK:
         t0 = time.time()
         log = TV.run(cmd)
@@ -178,7 +187,7 @@ HTML = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>PN60F5500 Optical Photometer v2</title>
+<title>PN60F5500 Bracketed Photometer v3</title>
 <style>
   :root { color-scheme: dark; --bg:#0d1117; --card:#161b22; --bd:#30363d; --ac:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
   body { margin:0; padding:10px; font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:#e6edf3; font-size:14px; }
@@ -189,16 +198,14 @@ HTML = r"""<!doctype html>
     background:#21262d; color:#e6edf3; border:1px solid var(--bd); border-radius:8px;
     padding:10px 12px; font-size:14px; cursor:pointer;
   }
-  button.primary { background:#1f6feb; border-color:#388bfd; font-weight:700; }
   button.ok { background:#238636; border-color:#2ea043; font-weight:700; }
-  button.warn { background:#9e6a03; border-color:#d29922; font-weight:600; }
   button.bad { background:#b62324; border-color:#f85149; font-weight:700; }
   button:disabled { opacity:.45; }
-  .vwrap { position:relative; width:100%; max-height:200px; overflow:hidden; border-radius:8px; background:#000; border:1px solid var(--bd); }
-  video { width:100%; height:200px; object-fit:cover; display:block; }
-  .reticle { position:absolute; left:50%; top:50%; width:42%; height:44%; transform:translate(-50%,-50%);
-    border:2px solid #3fb950; box-shadow:0 0 0 9999px rgba(0,0,0,.22); pointer-events:none; border-radius:4px; }
-  .hud { position:absolute; left:8px; bottom:8px; background:rgba(0,0,0,.74); padding:4px 8px; border-radius:6px; font-family:monospace; font-size:12px; }
+  .vwrap { position:relative; width:100%; max-height:190px; overflow:hidden; border-radius:8px; background:#000; border:1px solid var(--bd); }
+  video { width:100%; height:190px; object-fit:cover; display:block; }
+  .reticle { position:absolute; left:10%; top:10%; width:80%; height:80%;
+    border:2px solid #3fb950; pointer-events:none; border-radius:4px; box-sizing:border-box; }
+  .hud { position:absolute; left:8px; bottom:8px; background:rgba(0,0,0,.76); padding:4px 8px; border-radius:6px; font-family:monospace; font-size:12px; }
   .pill { font-size:12px; padding:2px 8px; border-radius:12px; background:#21262d; border:1px solid var(--bd); }
   table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:6px; }
   th, td { padding:5px 4px; border-bottom:1px solid var(--bd); text-align:right; }
@@ -208,7 +215,7 @@ HTML = r"""<!doctype html>
   svg { width:100%; height:175px; background:#090c10; border-radius:8px; border:1px solid var(--bd); margin-top:6px; }
   #status { font-size:13px; color:#c9d1d9; margin-top:6px; line-height:1.35; }
 </style></head><body>
-<h1>PN60F5500 Unclipped Full-White Photometer (v2)</h1>
+<h1>PN60F5500 A&rarr;B&rarr;A Bracketed Photometer (v3)</h1>
 
 <div class="card">
   <div class="vwrap">
@@ -217,26 +224,25 @@ HTML = r"""<!doctype html>
     <div class="hud" id="hud">Ready</div>
   </div>
   <div class="row" style="margin-top:8px">
-    <button id="goBtn" class="ok" style="flex:1;padding:13px;font-size:15px" onclick="oneClickRun()">&#9654; Start Camera &amp; Run Full Sweep (~60s)</button>
+    <button id="goBtn" class="ok" style="flex:1;padding:13px;font-size:15px" onclick="oneClickRun()">&#9654; Start Camera &amp; Run Bracketed Sweep (~75s)</button>
     <button id="stopBtn" class="bad" onclick="abortSweep = true" disabled>Stop</button>
   </div>
   <div class="row" style="margin-top:8px;justify-content:space-between">
     <select id="sweepSel" style="flex:1"></select>
-    <span class="pill" id="aePill">AE: --</span>
     <span class="pill" id="tempPill">Temp: --</span>
   </div>
-  <div id="status">Tap the green button once and hold your phone facing the TV (~60s). It automatically opens the camera, runs both unclipped Full-White sweeps, and restores Live HDMI!</div>
+  <div id="status">Uses symmetric A&rarr;B&rarr;A bracketing + NULL (128&rarr;128) controls to cancel the 0.06 Hz rolling-shutter beat! Fill the green box with the white TV screen and hold steady.</div>
 </div>
 
 <div class="card">
   <div class="row" style="justify-content:space-between">
-    <strong>Measured Luminance Curve (Median-Filtered)</strong>
+    <strong>Measured Luminance (A&rarr;B&rarr;A Cancelled)</strong>
     <button onclick="clearSweep()" style="padding:4px 8px;font-size:12px">Clear</button>
   </div>
   <svg id="chart" viewBox="0 0 360 175"></svg>
   <div id="summary" style="margin-top:6px;font-size:13px"></div>
   <table>
-    <thead><tr><th>Step</th><th>Rel Lum</th><th>+/-</th><th>vs Base</th><th>sRGB</th></tr></thead>
+    <thead><tr><th>Step</th><th>Ratio</th><th>&plusmn;SD</th><th>Drift</th><th>Runs</th></tr></thead>
     <tbody id="tbl"></tbody>
   </table>
 </div>
@@ -244,8 +250,8 @@ HTML = r"""<!doctype html>
 <canvas id="cnv" width="160" height="120" style="display:none"></canvas>
 
 <script>
-let SWEEPS = {}, MEAS = {}, curSweep = 'duty2_full';
-let stream = null, track = null, aeLocked = false, running = false, abortSweep = false;
+let SWEEPS = {}, MEAS = {}, curSweep = 'duty2_fine';
+let stream = null, running = false, abortSweep = false;
 let latestFrame = null, frameRing = [];
 
 const srgbLin = new Float32Array(256);
@@ -282,8 +288,6 @@ async function startCamera() {
     const vid = document.getElementById('vid');
     vid.srcObject = stream;
     await vid.play();
-    track = stream.getVideoTracks()[0];
-    await tryLockAE();
     requestAnimationFrame(sampleLoop);
     return true;
   } catch (e) {
@@ -292,39 +296,14 @@ async function startCamera() {
   }
 }
 
-async function oneClickRun() {
-  if (running) return;
-  const ok = await startCamera();
-  if (!ok) return;
-  await runAllSweeps();
-}
-
-async function tryLockAE() {
-  aeLocked = false;
-  if (track && track.getCapabilities) {
-    const caps = track.getCapabilities();
-    const adv = {};
-    if (caps.exposureMode && caps.exposureMode.includes('manual')) adv.exposureMode = 'manual';
-    if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('manual')) adv.whiteBalanceMode = 'manual';
-    if (Object.keys(adv).length > 0) {
-      try {
-        await track.applyConstraints({ advanced: [adv] });
-        if (adv.exposureMode === 'manual') aeLocked = true;
-      } catch (e) {}
-    }
-  }
-  document.getElementById('aePill').textContent = aeLocked ? 'AE: HW-LOCKED' : 'AE: MEDIAN-STEP';
-  setStatus('Camera ready (' + (aeLocked ? 'HW AE-Locked' : 'Median Step-Diff') + '). Fill green box with the TV screen and tap Run Unclipped 2x Sweep.');
-}
-
 function sampleLoop() {
   const vid = document.getElementById('vid');
   if (vid.readyState >= 2) {
     const cnv = document.getElementById('cnv');
     const ctx = cnv.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(vid, 0, 0, 160, 120);
-    // Large 68x52 center box averages across plasma rolling-shutter scanlines cleanly!
-    const img = ctx.getImageData(46, 34, 68, 52).data;
+    // Integrate 80% x 80% of the whole frame to average across rolling-shutter bands!
+    const img = ctx.getImageData(16, 12, 128, 96).data;
     let rSum = 0, gSum = 0, bSum = 0, rLin = 0, gLin = 0, bLin = 0, n = img.length / 4;
     for (let i = 0; i < img.length; i += 4) {
       const r = img[i], g = img[i+1], b = img[i+2];
@@ -339,7 +318,7 @@ function sampleLoop() {
     if (frameRing.length > 240) frameRing.shift();
     document.getElementById('hud').innerHTML =
       `Y_lin: ${(yl*100).toFixed(2)} | sRGB: ${Math.round(rm)}/${Math.round(gm)}/${Math.round(bm)}` +
-      (clipped ? ' <span style="color:#f85149">CLIP!</span>' : ' <span style="color:#3fb950">OK</span>');
+      (clipped ? ' <span style="color:#f85149">CLIP</span>' : ' <span style="color:#3fb950">OK</span>');
   }
   requestAnimationFrame(sampleLoop);
 }
@@ -356,21 +335,11 @@ async function tvApply(opts, withDump = false) {
   return d;
 }
 
-async function quickPattern(pat) {
-  const opts = pat === 'OFF'
-    ? 'UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4'
-    : 'UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4 PATTERN:' + pat;
-  setStatus('Setting TV pattern: ' + pat + '...');
-  await tvApply(opts, true);
-  setStatus('TV pattern: ' + pat);
-}
-
-function medianStats(tStart, tEnd) {
+function windowMean(tStart, tEnd) {
   const fs = frameRing.filter(f => f.t >= tStart && f.t <= tEnd);
   if (!fs.length) return { y: latestFrame.y, rgb: latestFrame.rgb, clipped: latestFrame.clipped, n: 1 };
   const sorted = [...fs].sort((a, b) => a.y - b.y);
-  // Trimmed mean (drop lowest 20% & highest 20% to kill both blanking dips and rolling-shutter spikes)
-  const lo = Math.floor(sorted.length * 0.2), hi = Math.max(lo + 1, Math.ceil(sorted.length * 0.8));
+  const lo = Math.floor(sorted.length * 0.15), hi = Math.max(lo + 1, Math.ceil(sorted.length * 0.85));
   const mid = sorted.slice(lo, hi);
   const y = mid.reduce((a, f) => a + f.y, 0) / mid.length;
   const r = mid.reduce((a, f) => a + f.rgb[0], 0) / mid.length;
@@ -379,19 +348,21 @@ function medianStats(tStart, tEnd) {
   return { y, rgb: [r, g, b], clipped: mid.some(f => f.clipped), n: mid.length };
 }
 
-async function runAllSweeps() {
+async function oneClickRun() {
   if (running) return;
+  const ok = await startCamera();
+  if (!ok) return;
   running = true; abortSweep = false;
   document.getElementById('goBtn').disabled = true;
   document.getElementById('stopBtn').disabled = false;
   const sweepKeys = Object.keys(SWEEPS);
 
   try {
-    setStatus('Showing Full-Field White — aim green box at TV (starting in 3s)...');
+    setStatus('Showing Full-Field White — aim green box so TV fills the frame...');
     await tvApply(SWEEPS[sweepKeys[0]].baseline_opts, true);
     for (let s = 3; s >= 1; s--) {
       if (abortSweep) break;
-      setStatus(`Aim green box at white TV screen — starting in ${s}...`);
+      setStatus(`Fill green box with white TV screen — starting in ${s}...`);
       await sleep(1000);
     }
 
@@ -401,68 +372,56 @@ async function runAllSweeps() {
       document.getElementById('sweepSel').value = curSweep;
       render();
       const sw = SWEEPS[curSweep];
-      const reps = sw.repeats || 2;
+      const reps = sw.repeats || 3;
 
-      setStatus(`[Sweep ${si+1}/${sweepKeys.length}] Settling baseline...`);
       await tvApply(sw.baseline_opts, si === 0);
-      await sleep(1200);
-      if (aeLocked) await tryLockAE();
-      await sleep(300);
+      await sleep(800);
 
       for (let i = 0; i < sw.steps.length; i++) {
         if (abortSweep) break;
         const st = sw.steps[i];
-
-        if (i === 0 && !aeLocked) {
-          const now = performance.now();
-          const pre = medianStats(now - 450, now);
-          await postMeasurement(curSweep, st.id, {
-            lum: 100.0, spread: 0, rgb_srgb: pre.rgb.map(v => +v.toFixed(1)),
-            clipped: pre.clipped, mode: 'median-step', runs: [100.0]
-          });
-          continue;
-        }
-
-        const runs = [];
+        const runs = [], drifts = [];
         let lastRgb = [0,0,0], anyClip = false;
+
         for (let rep = 0; rep < reps; rep++) {
           if (abortSweep) break;
-          if (aeLocked) {
-            setStatus(`[Sweep ${si+1}/${sweepKeys.length} · ${i+1}/${sw.steps.length}] ${st.label} (${rep+1}/${reps})...`);
-            await tvApply(st.opts, false);
-            await sleep(300);
-            const t0 = performance.now();
-            await sleep(450);
-            const m = medianStats(t0, performance.now());
-            runs.push(m.y * 100.0);
-            lastRgb = m.rgb; anyClip = anyClip || m.clipped;
-          } else {
-            if (i > 0 || rep > 0) {
-              setStatus(`[Sweep ${si+1}/${sweepKeys.length} · ${i+1}/${sw.steps.length}] ${st.label} (${rep+1}/${reps}): baseline...`);
-              await tvApply(sw.baseline_opts, false);
-              await sleep(1150);
-            }
-            const preEnd = performance.now();
-            const pre = medianStats(preEnd - 450, preEnd);
-            setStatus(`[Sweep ${si+1}/${sweepKeys.length} · ${i+1}/${sw.steps.length}] ${st.label} (${rep+1}/${reps}): measuring...`);
-            await tvApply(st.opts, false);
-            const tPost0 = performance.now() + 80;
-            await sleep(320);
-            const post = medianStats(tPost0, performance.now());
-            const ratio = pre.y > 1e-5 ? (post.y / pre.y) * 100.0 : 100.0;
-            runs.push(+ratio.toFixed(2));
-            lastRgb = post.rgb; anyClip = anyClip || post.clipped;
-          }
+          setStatus(`[Sweep ${si+1}/${sweepKeys.length} · ${i+1}/${sw.steps.length}] ${st.label} (bracket ${rep+1}/${reps})...`);
+          // Ensure we're settled on A (baseline)
+          await sleep(250);
+          const tA0End = performance.now();
+          const a0 = windowMean(tA0End - 180, tA0End);
+
+          // Step A -> B
+          await tvApply(st.opts, false);
+          const tBStart = performance.now() + 90;
+          await sleep(260);
+          const b = windowMean(tBStart, performance.now());
+
+          // Step B -> A (symmetric bracket closes in ~0.85s!)
+          await tvApply(sw.baseline_opts, false);
+          const tA1Start = performance.now() + 90;
+          await sleep(260);
+          const a1 = windowMean(tA1Start, performance.now());
+
+          const aMid = 0.5 * (a0.y + a1.y);
+          const driftPct = aMid > 1e-5 ? Math.abs(a1.y - a0.y) / aMid * 100.0 : 99.0;
+          const ratio = aMid > 1e-5 ? (b.y / aMid) * 100.0 : 100.0;
+          runs.push(+ratio.toFixed(2));
+          drifts.push(+driftPct.toFixed(1));
+          lastRgb = b.rgb;
+          anyClip = anyClip || b.clipped;
         }
         if (runs.length) {
           const mean = runs.reduce((a, b) => a + b, 0) / runs.length;
-          const spread = runs.length > 1 ? Math.abs(runs[1] - runs[0]) / 2 : 0;
+          const variance = runs.reduce((a, b) => a + (b - mean) ** 2, 0) / runs.length;
+          const sd = Math.sqrt(variance);
+          const meanDrift = drifts.reduce((a, b) => a + b, 0) / drifts.length;
           await postMeasurement(curSweep, st.id, {
             lum: +mean.toFixed(2),
-            spread: +spread.toFixed(2),
+            sd: +sd.toFixed(2),
+            drift: +meanDrift.toFixed(1),
             rgb_srgb: lastRgb.map(v => +v.toFixed(1)),
             clipped: anyClip,
-            mode: aeLocked ? 'hw-lock' : 'median-step',
             runs
           });
         }
@@ -470,8 +429,8 @@ async function runAllSweeps() {
     }
 
     setStatus(abortSweep ? 'Stopped — restoring Live HDMI...' : 'All sweeps complete! Restoring Live HDMI...');
-    await tvApply('UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:155 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON', true);
-    setStatus(abortSweep ? 'Stopped & Live HDMI restored.' : 'All done! Live HDMI restored — you can put the phone down!');
+    await tvApply('UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:168 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON', true);
+    setStatus(abortSweep ? 'Stopped & Live HDMI restored.' : 'All done! Live HDMI restored — check NULL controls & curve!');
   } catch (e) {
     setStatus('Error: ' + e.message);
   } finally {
@@ -507,8 +466,6 @@ function render() {
   const sw = SWEEPS[curSweep];
   const steps = sw.steps;
   const sm = MEAS[curSweep] || {};
-  const baseM = sm[steps[0].id];
-  const baseL = baseM ? baseM.lum : null;
   const tbody = document.getElementById('tbl');
   tbody.innerHTML = '';
   const pts = [];
@@ -516,52 +473,44 @@ function render() {
   steps.forEach(st => {
     const m = sm[st.id];
     const tr = document.createElement('tr');
-    let pct = '--', rgb = '--', lumStr = '--', sp = '--';
+    let lumStr = '--', sdStr = '--', drStr = '--', runsStr = '--';
     if (m) {
-      pts.push({ x: st.x, label: st.id, lum: m.lum, clipped: m.clipped });
-      lumStr = m.lum.toFixed(1) + (m.clipped ? '!' : '');
-      sp = m.spread !== undefined ? ('\u00b1' + m.spread.toFixed(1)) : '--';
-      if (baseL && baseL > 0) {
-        const dp = ((m.lum / baseL) - 1) * 100;
-        pct = (dp >= 0 ? '+' : '') + dp.toFixed(1) + '%';
-      }
-      if (m.rgb_srgb) rgb = m.rgb_srgb.map(Math.round).join('/');
+      pts.push({ x: st.x, label: st.id, lum: m.lum, clipped: m.clipped, isNull: st.id.startsWith('null') });
+      lumStr = m.lum.toFixed(1) + '%';
+      sdStr = '\u00b1' + (m.sd ?? 0).toFixed(1) + '%';
+      drStr = (m.drift ?? 0).toFixed(1) + '%';
+      runsStr = (m.runs || []).map(v => v.toFixed(0)).join('/');
     }
-    tr.innerHTML = `<td>${st.label}</td><td class="${m && m.clipped ? 'clip' : ''}">${lumStr}</td><td>${sp}</td><td class="good">${pct}</td><td>${rgb}</td>`;
+    tr.innerHTML = `<td>${st.label}</td><td class="${m && m.clipped ? 'clip' : 'good'}">${lumStr}</td><td>${sdStr}</td><td>${drStr}</td><td>${runsStr}</td>`;
     tbody.appendChild(tr);
   });
 
   const svg = document.getElementById('chart');
   if (!pts.length) {
-    svg.innerHTML = '<text x="180" y="90" fill="#8b949e" font-size="13" text-anchor="middle">Hold phone at TV and tap Run Unclipped 2x Sweep</text>';
+    svg.innerHTML = '<text x="180" y="90" fill="#8b949e" font-size="13" text-anchor="middle">Tap green button once to run A->B->A bracketed sweep</text>';
     document.getElementById('summary').textContent = '';
     return;
   }
   const minX = Math.min(...steps.map(s => s.x)), maxX = Math.max(...steps.map(s => s.x));
-  const minY = Math.min(...pts.map(p => p.lum)) * 0.94;
-  const maxY = Math.max(...pts.map(p => p.lum)) * 1.05 || 1;
+  const minY = Math.min(95, ...pts.map(p => p.lum)) * 0.96;
+  const maxY = Math.max(105, ...pts.map(p => p.lum)) * 1.04;
   const sx = x => 40 + ((x - minX) / (maxX - minX || 1)) * 302;
   const sy = y => 148 - ((y - minY) / (maxY - minY || 1)) * 128;
 
   let g = `<line x1="40" y1="148" x2="345" y2="148" stroke="#30363d"/><line x1="40" y1="18" x2="40" y2="148" stroke="#30363d"/>`;
-  g += `<text x="36" y="24" fill="#8b949e" font-size="10" text-anchor="end">${maxY.toFixed(1)}</text>`;
-  g += `<text x="36" y="148" fill="#8b949e" font-size="10" text-anchor="end">${minY.toFixed(1)}</text>`;
+  g += `<line x1="40" y1="${sy(100).toFixed(1)}" x2="345" y2="${sy(100).toFixed(1)}" stroke="#30363d" stroke-dasharray="4,4"/>`;
+  g += `<text x="36" y="24" fill="#8b949e" font-size="10" text-anchor="end">${maxY.toFixed(0)}%</text>`;
+  g += `<text x="36" y="148" fill="#8b949e" font-size="10" text-anchor="end">${minY.toFixed(0)}%</text>`;
   if (pts.length > 1) {
     const path = pts.map((p, i) => (i ? 'L' : 'M') + sx(p.x).toFixed(1) + ',' + sy(p.lum).toFixed(1)).join(' ');
     g += `<path d="${path}" fill="none" stroke="#58a6ff" stroke-width="2.5"/>`;
   }
   pts.forEach(p => {
     const cx = sx(p.x).toFixed(1), cy = sy(p.lum).toFixed(1);
-    const col = p.clipped ? '#f85149' : '#3fb950';
-    g += `<circle cx="${cx}" cy="${cy}" r="4.5" fill="${col}"/><text x="${cx}" y="164" fill="#8b949e" font-size="10" text-anchor="middle">${p.label}</text>`;
+    const col = p.isNull ? '#d29922' : (p.clipped ? '#f85149' : '#3fb950');
+    g += `<circle cx="${cx}" cy="${cy}" r="4.5" fill="${col}"/><text x="${cx}" y="164" fill="#8b949e" font-size="9.5" text-anchor="middle">${p.label}</text>`;
   });
   svg.innerHTML = g;
-
-  const peak = pts.reduce((a, b) => b.lum > a.lum ? b : a, pts[0]);
-  const knee = pts.find(p => p.lum >= peak.lum * 0.985);
-  document.getElementById('summary').innerHTML =
-    `Peak: <strong>${peak.label}</strong> (${peak.lum.toFixed(1)})` +
-    (knee ? ` &middot; 98.5% knee: <strong class="good">${knee.label}</strong>` : '');
 }
 init();
 </script></body></html>
@@ -649,7 +598,7 @@ def detect_local_ip(target_host):
 
 def main():
     global TV_HOST, LIB_PATH, TV
-    ap = argparse.ArgumentParser(description="Hands-free smartphone photometer for PN60F5500 libPDPTune")
+    ap = argparse.ArgumentParser(description="A->B->A bracketed smartphone photometer for PN60F5500 libPDPTune")
     ap.add_argument("--tv", required=True, help="TV IP address (telnet root shell on port 23)")
     ap.add_argument("--lib", default=LIB_PATH, help="libPDPTune.so path on the TV")
     ap.add_argument("--port", type=int, default=8443, help="HTTPS port to bind")
@@ -666,7 +615,7 @@ def main():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=cert, keyfile=key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    print(f"PN60F5500 Photometer listening on https://{host_ip}:{args.port}/ (TV={TV_HOST})", flush=True)
+    print(f"PN60F5500 Bracketed Photometer v3 listening on https://{host_ip}:{args.port}/ (TV={TV_HOST})", flush=True)
     srv.serve_forever()
 
 

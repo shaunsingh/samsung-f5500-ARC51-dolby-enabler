@@ -91,12 +91,25 @@ uint8_t fake_get_filmmode(void)
     return g_filmmode;
 }
 
-uint8_t fake_set_filmmode(uint8_t enable) __asm__("_Z29mbrg_outputsource_setfilmmodeh");
-uint8_t fake_set_filmmode(uint8_t enable)
+uint8_t body_set_filmmode(uint8_t enable)
 {
     g_filmmode = enable ? 1 : 0;
     return 1;
 }
+
+/* mbrg_outputsource_setfilmmode in libUTOPIA.so begins with push {r4, r5, fp, lr} (0xe92d4830). */
+__asm__(".text\n"
+        ".arm\n"
+        ".global _Z29mbrg_outputsource_setfilmmodeh\n"
+        ".type _Z29mbrg_outputsource_setfilmmodeh, %function\n"
+        "_Z29mbrg_outputsource_setfilmmodeh:\n"
+        "    push {r4, r5, fp, lr}\n"
+        "    add fp, sp, #12\n"
+        "    bl body_set_filmmode\n"
+        "    sub sp, fp, #12\n"
+        "    pop {r4, r5, fp, pc}\n");
+
+uint8_t fake_set_filmmode(uint8_t enable) __asm__("_Z29mbrg_outputsource_setfilmmodeh");
 
 uint16_t MApi_XC_GetOutputVFreqX100(void)
 {
@@ -447,10 +460,13 @@ static void test_pdptune(const char *libpath)
     CHECK(g_panel[APC_OFFSET] == 0);
     fw_write_i2c(&g_logic, DUTY2, 0x80);
     CHECK(g_panel[DUTY2] == 200);
+    /* Firmware attempts to reset Cinema Smooth to 0 on source switch are intercepted while armed. */
+    fake_set_filmmode(0);
+    CHECK(g_filmmode == 1);
 
     puts("OFF restores what the firmware last asked for");
     inject("DEEPBLACK:OFF");
-    EVENTUALLY(g_panel[DUTY2] == 0x80 && g_panel[TEST_PATTERN] == 0);
+    EVENTUALLY(g_panel[DUTY2] == 0x80 && g_panel[TEST_PATTERN] == 0 && g_filmmode == 0);
     CHECK(g_panel[DEEP_BLACK] == 0 && g_panel[PEAK_STRETCH] == 1 && g_panel[SUB_CONTRAST] == 0x0800);
     CHECK(g_panel[DEEP_BLACK_MODE] == 0 && g_panel[POWER_SAVE] == 1 && g_panel[APC_SPEED] == 0xc1ff);
     CHECK(g_panel[SAPC_TIMER] == 1 && g_panel[APC_OFFSET] == 50);

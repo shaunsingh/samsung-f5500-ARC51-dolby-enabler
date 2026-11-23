@@ -166,7 +166,7 @@ The boot script's default is `UNLOCK DRIVE:STANDARD`. The file `/mnt/opt/private
 The configuration on this TV is:
 
 ```text
-UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:155 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON
+UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:168 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON
 ```
 
 ### Options
@@ -183,10 +183,10 @@ UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OF
 | `SAPC:ON` / `OFF` | **Enabled** (`OFF`) | Holds `LogicFHD::t_Logic_SetSAPCTimer` register `0x89ee` at `1` or `0`. `OFF` disables Static APC time-based dimming (on by default in stock Movie mode). |
 | `APC_OFFSET:<0..511>` | **Not set** (guard kept) | Overrides `APC_OFFSET` (`0x89c0`). `0` locks full Cell Light 20 and bypasses thermal/Eco/Movie-PWM APC throttling while keeping `DUTY2` boosts active. |
 | `SUBCONTRAST:<100..220>` | **132** | Sets Sub Contrast (register `0x8927`, value × 16) apart from the Contrast menu. `132` is factory Standard; `128` is Movie. Values past white-clipping will clip highlights. |
-| `DUTY2:<79..255>` | **155**, measured peak | Writes the full 8-bit second panel duty word (`0x89da`, stock formula `79 + final_duty / 21`). Optical sweep found `155` hits `+30.5% ± 0.9%` full-field luminance before fold-back at `175–215`. See [Duty](#duty). |
+| `DUTY2:<79..255>` | **168**, measured peak | Writes the full 8-bit second panel duty word (`0x89da`, stock formula `79 + final_duty / 21`). `A → B → A` bracketed optical sweep (`NULL` controls `99.6–100.8%`) pinpointed `168` at `+42.8% ± 1.0%` full-field luminance above `128` before fold-back. See [Duty](#duty). |
 | `GAMMA:TOE` / `2.3` / `2.4` / `BT1886` | **`2.4`** | Composes a 12-bit curve onto `exeTV`'s gamma LUT and keeps white balance. Not hooked unless one of these words is present. |
 | `OSD_GAMMA:<-3..3>` | **0** | Sets the OSD Gamma slider the curve is built on. `0` is the neutral baseline. |
-| `CINEMA_SMOOTH:ON` / `OFF` | **Enabled** (`ON`) | Enables MStar X12's native 24p → 48 Hz (2:1) FRC table via `mbrg_outputsource_setfilmmode` in `libUTOPIA.so` instead of 3:2 pulldown to 60 Hz. 50/60 Hz inputs stay 1:1 untouched. |
+| `CINEMA_SMOOTH:ON` / `OFF` | **Enabled** (`ON`) | Hooks `mbrg_outputsource_setfilmmode` in `libUTOPIA.so` to hold MStar X12's native 24p → 48 Hz (2:1) FRC table across source/mode changes instead of 3:2 pulldown to 60 Hz. 50/60 Hz inputs stay 1:1 untouched. |
 | `PATTERN:OFF\|BLACK\|WHITE\|RED\|GREEN\|BLUE\|BOX9\|SCROLL` | **Not left on** | Drives LogicFHD hardware test patterns (`0x8114`), including `WHITE` / `BOX9` for optical sweeps and `SCROLL` for burn-in wipe. Reverts to `OFF` (`0x0000`) when omitted or on `OFF`. |
 | `DUMP` | **Not left on** | Logs hook state, all managed and diagnostic LogicFHD registers, OSD Gamma, panel temperature, Cinema Smooth state, and live `OutputVFreq`. Changes nothing. |
 | `OFF` | **Not in use** | Removes the hooks and restores the firmware's register, Cinema Smooth, and gamma values. |
@@ -241,7 +241,7 @@ These dE00 figures are calculated from a 2014 measurement of a different PN60F55
 ```sh
 . /dtv/SGO.env
 samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libPDPTune.so \
-    UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:155 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON DUMP
+    UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:168 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON DUMP
 cat /dtv/PDPTune.log
 ```
 

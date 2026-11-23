@@ -64,9 +64,9 @@ void lib_init(void *handle, const char *libpath)
     static const rgb_t identity[6] = {
         { 50, 0, 0 }, { 0, 50, 0 }, { 0, 0, 50 }, { 50, 50, 0 }, { 0, 50, 50 }, { 50, 0, 50 },
     };
-    /* Hue-aligned wide/near-native preset (WCE off, zero milky 3rd-channel bleed) */
+    /* CIEDE2000 + CIE 1976 u'v' minimax wide/near-native preset (WCE off, zero 3rd-channel bleed) */
     static const rgb_t wide_preset[6] = {
-        { 47, 0, 20 }, { 55, 55, 0 }, { 12, 0, 50 }, { 47, 55, 0 }, { 25, 52, 52 }, { 44, 0, 52 },
+        { 41, 0, 0 }, { 73, 54, 0 }, { 0, 0, 49 }, { 46, 54, 0 }, { 49, 54, 53 }, { 41, 0, 52 },
     };
     /* Legacy FS=500 heuristic preset */
     static const rgb_t bt709_preset[6] = {

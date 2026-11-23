@@ -66,6 +66,7 @@ build/fake_exeapp: test/fake_exeapp.c | build
 
 test: $(LIBS) build/fake_exetv build/fake_exeapp
 	python3 scripts/gamma_curves.py --check
+	python3 scripts/gamut/solve_cms.py --check
 	$(QEMU) build/fake_exetv $(abspath build/libPDPTune.so build/libDDCRAM_EDID.so)
 	$(QEMU) build/fake_exeapp $(abspath build/libArcToggle.so)
 

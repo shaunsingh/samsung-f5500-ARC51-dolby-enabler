@@ -223,20 +223,20 @@ These are the menu settings used with the configuration above:
 
 ### Color Space (`WIDE` Custom vs `Auto` vs `Native`)
 
-Firmware disassembly of `PrimePictureShare::m_PrimePicture_SetColorSpace` and `m_PrimePicture_Set_ColorMapping` shows that **Auto** (`0x2b0`–`0x2c1`) and **Custom** (`0x3a9`–`0x3b8`) both disable WCE (`0x280 = 0`) and share the exact same Bank `0x14` 3×3×3 LUT routine (`on = 10*(x-50) + 512`, `off = 5*x + 512`), whereas **Native** (`0x2c2`–`0x2e5`) enables WCE. Checking Samsung's factory `Auto` table (`G = [86, 54, 28]`, `C = [85, 48, 52]`) proves Bank `0x14`'s physical full scale is ~`1024–1536` rather than the `500` assumed by `scripts/gamut/model.py` (see [firmware-reference.md](docs/firmware-reference.md#factory-color-tables)).
+Firmware disassembly of `PrimePictureShare::m_PrimePicture_SetColorSpace` and `m_PrimePicture_Set_ColorMapping` shows that **Auto** (`0x2b0`–`0x2c1`) and **Custom** (`0x3a9`–`0x3b8`) both disable WCE (`0x280 = 0`) and share the exact same Bank `0x14` 3×3×3 LUT routine (`on = 10*(x-50) + 512`, `off = 5*x + 512`), whereas **Native** (`0x2c2`–`0x2e5`) enables WCE. Calibrating Samsung's factory `Auto` table (`G = [86, 54, 28]`, `C = [85, 48, 52]`) against ITU-R BT.709-6 in perceptual CIE 1976 `u'v'` / CIEDE2000 puts Bank `0x14`'s physical full scale at `FS ≈ 1536–1664` (`mean du'v' = 0.0089`, vs `0.0464` / `ΔE2000 = 14.4` at the legacy `FS = 500` assumption; see [scripts/gamut/solve_cms.py](scripts/gamut/solve_cms.py) and [firmware-reference.md](docs/firmware-reference.md#factory-color-tables)).
 
-For maximum clean gamut punch without WCE distortion or `Auto`'s 3-channel desaturation, the **`WIDE`** Custom preset (`libCMSApply WIDE`) keeps near-native phosphor saturation (~103.6% of Rec.709, zero third-channel bleed on R/G/B/Y/M) while correcting Native's Yellow/Cyan/Magenta/Green hue shifts (`avg |Δhue| ~1.4°` vs `4.0–5.7°` in Native across `FS = 1024–1536`):
+To use the panel's clean near-native phosphor gamut without WCE distortion or `Auto`'s 3-channel desaturation, the **`WIDE`** Custom preset (`libCMSApply WIDE`) is solved by minimax optimization of CIE 1976 `u'v'` hue angle and CIELAB lightness (`|ΔL*|`) across `FS ∈ {1024, 1280, 1536}` at `GAMMA:2.4` with zero third-channel bleed on R/G/B/Y/M—outperforming `Native`, `Auto`, and the legacy `BT709` table on every perceptual metric simultaneously (`mean ΔE2000 = 2.14–2.48`, `mean u'v' hue = 0.89°–1.43°`, `mean |ΔL*| = 0.29–0.67`, `avgSat = 101.3%–102.0%`):
 
 | Colour | R | G | B |
 |---|---:|---:|---:|
-| Red | 47 | 0 | 20 |
-| Green | 55 | 55 | 0 |
-| Blue | 12 | 0 | 50 |
-| Yellow | 47 | 55 | 0 |
-| Cyan | 25 | 52 | 52 |
-| Magenta | 44 | 0 | 52 |
+| Red | 41 | 0 | 0 |
+| Green | 73 | 54 | 0 |
+| Blue | 0 | 0 | 49 |
+| Yellow | 46 | 54 | 0 |
+| Cyan | 49 | 54 | 53 |
+| Magenta | 41 | 0 | 52 |
 
-`libCMSApply` supports `WIDE` (hue-aligned near-native Custom, WCE off), `AUTO` (factory Rec.709 LUT, WCE off), `BT709` (legacy `FS=500` Custom preset), and `NATIVE` (reverts to Native with WCE). The historical picture backups are in [calibration/](calibration/README.md) and [validation](docs/validation.md).
+`libCMSApply` supports `WIDE` (CIEDE2000/`u'v'` minimax near-native Custom, WCE off), `AUTO` (factory Rec.709 LUT, WCE off), `BT709` (legacy `FS=500` Custom preset), and `NATIVE` (reverts to Native with WCE). Run `python3 scripts/gamut/solve_cms.py` to reproduce the full table (`--check` is verified by `make test`). Historical picture backups are in [calibration/](calibration/README.md) and [validation](docs/validation.md).
 
 ### Apply a configuration
 

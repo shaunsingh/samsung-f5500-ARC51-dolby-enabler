@@ -88,7 +88,10 @@ def beam_audio_code(beam_host):
 def jellyfin_sessions(base_url, api_key):
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/Sessions",
-        headers={"X-Emby-Token": api_key, "Accept": "application/json"},
+        headers={
+            "Authorization": f'MediaBrowser Token="{api_key}"',
+            "Accept": "application/json",
+        },
     )
     with urllib.request.urlopen(req, timeout=4.0) as r:
         return json.loads(r.read().decode())
@@ -112,19 +115,19 @@ def active_audio_info(sessions, device_filter):
         title = item.get("Name", "unknown")
         aidx = ps.get("AudioStreamIndex")
         channels = None
+        audio_streams = [st for st in (item.get("MediaStreams") or []) if st.get("Type") == "Audio"]
 
-        # Prefer the selected source audio stream's true channel count
-        for st in item.get("MediaStreams") or []:
-            if st.get("Type") != "Audio":
-                continue
-            if aidx is None or st.get("Index") == aidx:
-                channels = st.get("Channels")
-                if aidx is not None:
+        if aidx is not None:
+            for st in audio_streams:
+                if st.get("Index") == aidx:
+                    channels = st.get("Channels")
                     break
-        # Fall back to transcoding channel count if source metadata lacked Channels
         if channels is None:
             ti = s.get("TranscodingInfo") or {}
             channels = ti.get("AudioChannels")
+        if channels is None and audio_streams:
+            default_st = next((st for st in audio_streams if st.get("IsDefault")), audio_streams[0])
+            channels = default_st.get("Channels")
 
         if channels is not None:
             return (item_id, aidx), int(channels), title, dev

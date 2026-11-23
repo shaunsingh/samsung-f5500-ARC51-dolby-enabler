@@ -15,7 +15,7 @@ src/            libDDCRAM_EDID.c, libPDPTune.c, libArcToggle.c, libCMSApply.c,
                 libCMProbe.c, libCMFactory.c, libHPD.c, libAudioProbe.c,
                 gamma_tables.h, samygo.h
 init/           boot scripts for the EDID patch, libPDPTune, and libArcToggle
-scripts/        patch_edid_51.py, gamma_curves.py, optical_sweep.py, gamut/
+scripts/        patch_edid_51.py, gamma_curves.py, optical_sweep.py, jellyfin_arc_sync.py, gamut/
 test/           fake_exetv.c and fake_exeapp.c, QEMU stand-ins for all three boot payloads
 prebuilt/       the built libraries
 calibration/    picture-state files and this set's EDIDs
@@ -102,8 +102,8 @@ Leave the source in its normal limited RGB range, with the TV's HDMI black level
 
 ### Audio limitations
 
-- Content-aware automatic switching is not implemented. Beam has no input-format override, and Samsung exposes only stereo PCM capture and stereo level reporting, not the six decoded channels needed to detect surround activity inside a DD 5.1 container. A clean implementation would require a new multichannel decoder/DSP tap and a hysteretic PCM/bitstream router. The remote toggle below is the manual switch.
-- Because the source format is global, stereo programmes are re-encoded into Dolby Digital when the source is set to Dolby Digital. They are not passed as stereo PCM for the receiver to upmix.
+- **Automatic Stereo/Surround switching for Jellyfin**: While the TV itself exposes only stereo PCM capture and cannot inspect 5.1 channels inside a DD bitstream, [`scripts/jellyfin_arc_sync.py`](scripts/jellyfin_arc_sync.py) polls a local Jellyfin server's `/Sessions` API and invokes `libArcToggle` (`PCM` for `<= 2ch`, `DD` for `>= 3ch`) whenever a new media item or audio stream begins on Xbox, without overriding manual DVR button presses mid-item.
+- Because the source format is global, non-Jellyfin stereo programmes are re-encoded into Dolby Digital unless toggled manually with the DVR key.
 - DTS 5.1 is advertised and selected the same way. Playback was not checked on a receiver that only decodes Dolby Digital.
 - This path does not carry multichannel LPCM, Dolby Digital Plus, TrueHD/Atmos, DTS-HD, or eARC.
 

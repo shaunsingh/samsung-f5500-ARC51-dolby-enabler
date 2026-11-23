@@ -91,9 +91,9 @@ samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libBackPicSet.so \
 
 ## Content-aware stereo/surround switching
 
-The requested behavior was investigated: sustained front-left/right-only activity would select stereo PCM, while sustained center/surround/LFE activity would select the original DD 5.1 bitstream, with hysteresis.
+On-TV DSP detection cannot inspect the six channels inside a DD 5.1 bitstream (Samsung exposes only stereo PCM capture and L/R level reporting, and Beam Gen 1 has no input-codec override).
 
-Content-aware automatic switching is not implemented. Beam has no input-format override, and Samsung exposes only stereo PCM capture and stereo level reporting, not the six decoded channels needed to detect surround activity inside a DD 5.1 container. A clean implementation would require a new multichannel decoder/DSP tap and a hysteretic PCM/bitstream router.
+For Jellyfin playback from a local server, `scripts/jellyfin_arc_sync.py` solves this cleanly out-of-band by querying Jellyfin's `/Sessions` API for the active audio stream's true `Channels` count and driving `libArcToggle` (`PCM` for `<= 2ch`, `DD` for `>= 3ch`) on item or audio-track changes without fighting manual DVR key presses.
 
 ## Optical limits
 

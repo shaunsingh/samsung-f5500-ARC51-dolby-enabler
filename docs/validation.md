@@ -14,6 +14,19 @@ Validation was performed on the development **PN60F5500AF**, firmware **T-MST12A
 
 The Beam's status endpoint is `http://BEAM_IP:1400/status/zp`. Samsung's OSD may display PCM regardless of the actual ARC bitstream.
 
+### Remote ARC toggle (`libArcToggle` 2.0.0)
+
+- Injected resident into `exeAPP` with `KEY:DVR` (`0x0072` / `114`).
+- Seven consecutive presses of the remote **DVR** button logged clean press (`type=11`) and release (`type=12`) pairs and swapped the HDMI2 ARC output in 475–506 ms per press.
+- Beam `HTAudioInCode` tracked every toggle live between `84934713` (Dolby Digital 5.1) and `33554434` (Stereo PCM 2.0).
+- Zero universal-remote setup prompts appeared, and zero idle events were logged.
+
+## Plasma register tuning (`libPDPTune` 2.4.0)
+
+Stock Movie-mode 60 Hz readback on HDMI3 at 38 °C showed `0x806f = 0x0105`, `0x80bf = 0x0000` (DeepBlackMode off on 60 Hz), `0x89ee = 0x0001` (Static APC timer active), `0x89c0 = 0x0000` (APC offset 0), `0x89da = 0x0080` (`128`), and `0x8927 = 0x0800` (`128`).
+
+Applying `UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4` read back `0x806f = 0x0111`, `0x809c = 0x0003`, `0x8063 = 0x0001`, `0x80bf = 0x0001`, `0x8064 = 0x0000`, `0x89bf = 0x41ff`, `0x89c0 = 0x0000`, `0x89ee = 0x0000`, `0x89da = 0x00c8` (`200`), and `0x8927 = 0x0840` (`132`). `DEEPBLACK_MODE:ON` ran flicker-free at 60 Hz, and stepping `DUTY2` across `175`, `215`, and `255` (`0x00ff`) held panel temperature steady at 42–43 °C with `APCOffset = 0x0000` and the thermal APC guard kept intact; `200` was persisted as a conservative high-duty operating point.
+
 ## Picture menu used with this configuration
 
 Movie, Cell Light 20, Contrast 100, Brightness 50, Color Space Custom, OSD Gamma 0, `GAMMA:2.4`. The source stays in limited RGB with the TV's HDMI black level on Low. Full-range RGB crushed the codes just above black.

@@ -72,7 +72,11 @@ enum {
     DRIVE = 0x806f,
     DEEP_BLACK = 0x809c,
     PEAK_STRETCH = 0x8063,
+    DEEP_BLACK_MODE = 0x80bf,
+    POWER_SAVE = 0x8064,
+    APC_SPEED = 0x89bf,
     APC_OFFSET = 0x89c0,
+    SAPC_TIMER = 0x89ee,
     DUTY2 = 0x89da,
     SUB_CONTRAST = 0x8927,
     OTHER = 0x803d
@@ -345,13 +349,19 @@ static void test_pdptune(const char *libpath)
     /* The picture as the firmware leaves it in Movie mode. */
     logic_ic = &g_logic;
     fw_write_i2c(&g_logic, DRIVE, 0x05);
+    fw_write_i2c(&g_logic, DEEP_BLACK_MODE, 0);
+    fw_write_i2c(&g_logic, POWER_SAVE, 1);
+    fw_write_i2c(&g_logic, APC_SPEED, 0xc1ff);
+    fw_write_i2c(&g_logic, SAPC_TIMER, 1);
     fw_write_i2c(&g_logic, DUTY2, 0x80);
     fw_write_i2c(&g_logic, SUB_CONTRAST, 0x0800);
 
     puts("bad arguments change nothing");
-    inject("DRIVE:STANDARD DUTY2:161");
+    inject("DRIVE:STANDARD DUTY2:256");
     inject("DRIVE:FAST");
     inject("SUBCONTRAST:13x");
+    inject("SUBCONTRAST:221");
+    inject("APC_OFFSET:512");
     inject("DEEPBLACK:");
     inject("");
     usleep(300000);
@@ -406,10 +416,24 @@ static void test_pdptune(const char *libpath)
     fw_write_i2c(&g_logic, PEAK_STRETCH, 1);
     CHECK(g_panel[DEEP_BLACK] == 3 && g_panel[PEAK_STRETCH] == 1);
 
+    puts("extended max-performance registers override APC/SAPC/DeepBlackMode/PowerSave and restore on OFF");
+    inject("DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF APC_OFFSET:0 DUTY2:200 SUBCONTRAST:140");
+    EVENTUALLY(g_panel[DUTY2] == 200 && g_panel[SUB_CONTRAST] == (140 << 4));
+    CHECK(g_panel[DEEP_BLACK_MODE] == 1 && g_panel[POWER_SAVE] == 0);
+    CHECK(g_panel[APC_SPEED] == 0x41ff && g_panel[SAPC_TIMER] == 0 && g_panel[APC_OFFSET] == 0);
+    /* With APC_OFFSET:0 explicitly armed, firmware thermal/Eco dimming is overridden and DUTY2 stays boosted. */
+    fw_write_i2c(&g_logic, APC_OFFSET, 50);
+    CHECK(g_panel[APC_OFFSET] == 0);
+    fw_write_i2c(&g_logic, DUTY2, 0x80);
+    CHECK(g_panel[DUTY2] == 200);
+
     puts("OFF restores what the firmware last asked for");
     inject("DEEPBLACK:OFF");
     EVENTUALLY(g_panel[DUTY2] == 0x80);
     CHECK(g_panel[DEEP_BLACK] == 0 && g_panel[PEAK_STRETCH] == 1 && g_panel[SUB_CONTRAST] == 0x0800);
+    CHECK(g_panel[DEEP_BLACK_MODE] == 0 && g_panel[POWER_SAVE] == 1 && g_panel[APC_SPEED] == 0xc1ff);
+    CHECK(g_panel[SAPC_TIMER] == 1 && g_panel[APC_OFFSET] == 50);
+    fw_write_i2c(&g_logic, APC_OFFSET, 0);
     inject("OFF");
     EVENTUALLY(!hooked(fw_write_i2c));
     CHECK(g_panel[DRIVE] == 0x05 && g_panel[DEEP_BLACK] == 0 && g_panel[PEAK_STRETCH] == 1);

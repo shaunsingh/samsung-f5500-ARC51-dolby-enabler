@@ -1,11 +1,10 @@
 #!/bin/sh
 #
-# Loads libArcToggle into exeTV at boot, and into exeAPP so the DVR button
-# does not raise the universal-remote setup prompt. With no words the exeTV
-# copy logs key ids and does not toggle. Words in libArcToggle.conf next to
-# the library replace that, for example KEY:0x50. '#' starts a comment. An
-# empty STOP or STOP_ARCTOGGLE file in the root of the stick skips it. The
-# README explains LOG, KEY, PCM, DD, TOGGLE and OFF.
+# Loads libArcToggle into exeAPP at boot so the DVR button (0x72) toggles
+# SPDIF/ARC audio between PCM and Dolby Digital and never opens the universal-
+# remote setup prompt. Words in libArcToggle.conf next to the library replace
+# the default (KEY:DVR). '#' starts a comment. An empty STOP or STOP_ARCTOGGLE
+# file in the root of a USB stick skips it.
 #
 # shellcheck source=/dev/null
 . /dtv/SGO.env
@@ -13,7 +12,7 @@
 LIB="${LIBSO_DIR:-$SYSROOT/opt/privateer/usr/libso}/libArcToggle.so"
 CONF="${LIB%.so}.conf"
 LOG=/dtv/ArcToggle.log
-OPTIONS=""
+OPTIONS="KEY:DVR"
 
 case $1 in
 	start)
@@ -23,21 +22,23 @@ case $1 in
 			exit 0
 		fi
 	done
-	if [ -f "$LIB" ] && pidof exeTV > /dev/null; then
-		cr=$(printf '\r')
-		[ -f "$CONF" ] && OPTIONS=$(sed "s/#.*//; s/$cr//" "$CONF")
-		rm -f "$LOG"
-		# One argument per word. Empty OPTIONS arms the default key.
-		# shellcheck disable=SC2086
-		samyGOso -T -B -r -l "$LIB" $OPTIONS
+	if [ -f "$LIB" ]; then
 		i=0
-		while [ "$i" -lt 5 ]; do
+		while [ "$i" -lt 15 ]; do
 			pidof exeAPP > /dev/null && break
 			i=$((i + 1))
 			sleep 1
 		done
 		if pidof exeAPP > /dev/null; then
-			samyGOso -n exeAPP -B -r -l "$LIB"
+			cr=$(printf '\r')
+			if [ -f "$CONF" ]; then
+				conf_opts=$(sed "s/#.*//; s/$cr//" "$CONF")
+				[ -n "$(printf '%s' "$conf_opts" | tr -d '[:space:]')" ] && OPTIONS="$conf_opts"
+			fi
+			rm -f "$LOG"
+			# One argument per word.
+			# shellcheck disable=SC2086
+			samyGOso -n exeAPP -B -r -l "$LIB" $OPTIONS
 		fi
 	fi
 	;;

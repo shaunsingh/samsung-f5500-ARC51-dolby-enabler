@@ -16,7 +16,7 @@ src/            libDDCRAM_EDID.c, libPDPTune.c, libArcToggle.c, libCMSApply.c,
                 gamma_tables.h, samygo.h
 init/           boot scripts for the EDID patch, libPDPTune, and libArcToggle
 scripts/        patch_edid_51.py, gamma_curves.py, gamut/, re/
-test/           fake_exetv.c, the QEMU stand-in for the two boot payloads
+test/           fake_exetv.c and fake_exeapp.c, QEMU stand-ins for all three boot payloads
 prebuilt/       the built libraries
 calibration/    picture-state files and this set's EDIDs
 docs/           firmware-reference.md, validation.md
@@ -111,48 +111,47 @@ The checks behind those limits are in [validation](docs/validation.md).
 
 ## Remote PCM / Dolby Digital toggle
 
-`libArcToggle` calls the same function as **Sound → Additional Settings → SPDIF Output → Audio Format**. PCM is `0` and Dolby Digital is `1`. The call uses query `0`, which is the path that programs the output. A different firmware is logged and left unchanged.
+`libArcToggle` runs in **`exeAPP`** and swaps **PCM** (`0`) and **Dolby Digital** (`1`) via `TCSpeakerProxy::SetExternalOutMode(..., 0)`, the same Binder IPC path used by **Sound → Additional Settings → SPDIF Output → Audio Format**. A different process or firmware build is logged and left unchanged.
 
-The live command is the first byte of the buffer passed to `TDcPrimeMicomInterface::t_ParsePacket`. On this set that byte is `0x50` for the DVR button. The same command also arrives when the button is not pressed, and arming it flips PCM and Dolby during playback, so the boot configuration does not arm a key. With no words the payload only logs presses. `KEY:` arms the toggle. A held key repeats. The payload toggles once per press and swallows every repeat of the armed key, so a hold does not also open a menu.
-
-Playback of the switch on a receiver has not been checked. The log shows the menu value before and after the call. If that value changes and the bitstream does not, the output refresh is a separate step.
+Both the IR remote (via `exeTV` `KeyCommon` → Binder → `APPRemoteControlInputNative`) and the Bluetooth Smart Touch remote (via `bsa_server` → `BluetoothInputDev`) dispatch through `CRemoteControlInput::ProcessRemoteControlEvent` (`_ZTV19CRemoteControlInput` slots `+0x30` and `+0x44`), upstream of `SMInput` and `CTvApplicationManager::m_OnKeyDirectMBR`. Swapping those two vtable pointers atomically intercepts and swallows press, repeat, and release events for the armed key — so `KEY:DVR` (`0x72` / `114`) toggles PCM ↔ Dolby Digital cleanly, never triggers on idle MICOM frames, and never raises the universal-remote setup prompt.
 
 ### Installation
 
 Copy `prebuilt/libArcToggle.so` to `/mnt/opt/privateer/usr/libso/` and `init/99_93_ArcToggle.init` to `/mnt/etc/init.d/` (`chmod 755`).
 
-With no words, the boot script logs commands and does not toggle. `/mnt/opt/privateer/usr/libso/libArcToggle.conf` replaces that. One or more words per line. On this set the DVR button is `KEY:0x50`. An empty `STOP_ARCTOGGLE` or `STOP` in the root of the stick skips the script.
+With no words, the boot script arms `KEY:DVR` (`0x72`). `/mnt/opt/privateer/usr/libso/libArcToggle.conf` replaces that default. One or more words per line. An empty `STOP_ARCTOGGLE` or `STOP` in the root of the stick skips the script.
 
 ### Options
 
 | Option | What it does |
 |---|---|
-| *(none)* / `LOG` | Hooks the remote and appends each key id to the log. Does not toggle. |
-| `KEY:N` | Toggles on that key id. `0x` is hex; a bare number is decimal. `1`–`255`. |
-| `PCM` / `DD` / `TOGGLE` | Sets PCM, sets Dolby Digital, or swaps once. Does not hook the remote unless a hook option is present. `DOLBY` is the same as `DD`. |
-| `OFF` | Removes the hook. It accepts no other word. |
+| *(none)* / `KEY:DVR` | Hooks `CRemoteControlInput` in `exeAPP` and toggles PCM ↔ Dolby Digital on `KEY_DVR` (`0x72` / `114`). |
+| `KEY:N` | Toggles on any 16-bit Samsung keycode `1`–`65535` (`0x` hex or decimal) or `DVR`. |
+| `LOG` | Hooks `CRemoteControlInput` and appends each keycode and event type to `/dtv/ArcToggle.log`. Does not toggle unless `KEY:` is also given. |
+| `PCM` / `DD` / `TOGGLE` | Sets PCM, sets Dolby Digital, or swaps once on a worker thread. `DOLBY` is the same as `DD`. |
+| `OFF` | Restores both vtable slots and disarms the hook. Accepts no other word. |
 
-A bad word is reported and the whole injection is ignored. Injecting again changes the key and the log switch without installing a second hook.
+A bad word is reported and the whole injection is ignored. Injecting again updates the armed key and log flag without installing a second hook.
 
-### Find the button, then arm it
+### Test or rebind a button
 
 ```sh
 . /dtv/SGO.env
-samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so LOG
-# press the button once
+samyGOso -n exeAPP -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so LOG
+# press a button once
 cat /dtv/ArcToggle.log
-samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so KEY:111
+samyGOso -n exeAPP -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so KEY:DVR
 cat /dtv/ArcToggle.log
 ```
 
-On this set the DVR button is command `0x50`. Use the command `LOG` printed. To try the switch before a button is known:
+To test the switch immediately without pressing a button:
 
 ```sh
-samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libArcToggle.so TOGGLE
+samyGOso -n exeAPP -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so TOGGLE
 cat /dtv/ArcToggle.log
 ```
 
-The log is `/dtv/ArcToggle.log`. A line like `PCM -> Dolby set=1 now=Dolby` means the menu value changed. On this firmware the call returns 1. `set=` is that return code.
+The log is `/dtv/ArcToggle.log`. A line like `PCM -> Dolby set=1 now=Dolby 12ms` confirms the Binder call succeeded.
 
 ## Plasma picture tuning
 
@@ -167,7 +166,7 @@ The boot script's default is `UNLOCK DRIVE:STANDARD`. The file `/mnt/opt/private
 The configuration on this TV is:
 
 ```text
-UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON SUBCONTRAST:132 DUTY2:139 OSD_GAMMA:0 GAMMA:2.4
+UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4
 ```
 
 ### Options
@@ -176,13 +175,18 @@ UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON SUBCONTRAST:132 DUTY2:139 OSD_
 |---|---|---|
 | `UNLOCK` | **Enabled** | Shows 10-point White Balance, Color Space → Custom, and Expert Pattern. |
 | `DRIVE:STANDARD` | **Enabled** | In 2D, Movie and Relax normally use drive mode `0x05` and Dynamic, Standard, and Natural use `0x11` (register `0x806f`). This sends `0x11` wherever the firmware asks for `0x05`. |
-| `DEEPBLACK:ON` / `OFF` | **Enabled** (`ON`) | Holds the Deep Black register `0x809c` at `3`. `OFF` holds it at `0`. `ON` is the value this panel already has at startup. What the logic board does with it is not documented. |
-| `PEAKSTRETCH:ON` / `OFF` | **Enabled** (`ON`) | Holds the Peak Stretch register `0x8063` at `1`. `OFF` holds it at `0`. `ON` is the value this panel already has at startup. What the logic board does with it is not documented. |
-| `SUBCONTRAST:<100..160>` | **132** | Sets Sub Contrast (register `0x8927`, the service value times 16) apart from the Contrast menu. `132` is the factory Standard value. Movie's factory value is `128`. This is a level, not a switch. |
-| `DUTY2:<79..160>` | **139, experimental** | Writes the second panel duty word. See [Duty](#duty). |
+| `DEEPBLACK:ON` / `OFF` | **Enabled** (`ON`) | Holds the Black Optimizer Deep Black register `0x809c` at `3` (`OFF` holds `0`). |
+| `PEAKSTRETCH:ON` / `OFF` | **Enabled** (`ON`) | Holds the Black Optimizer Peak Stretch register `0x8063` at `1` (`OFF` holds `0`). |
+| `DEEPBLACK_MODE:ON` / `OFF` | **Enabled** (`ON`) | Holds `LogicFHD::t_Logic_SetDeepBlackMode` register `0x80bf` at `1` or `0`. Stock firmware only enables `0x80bf` for 50 Hz PAL signals. |
+| `POWERSAVE:ON` / `OFF` | **Enabled** (`OFF`) | Holds `LogicFHD::t_Logic_SetPowerSaveMode` register `0x8064` at `1` or `0`. |
+| `APCSPEED:ON` / `OFF` | **Enabled** (`OFF`) | Holds `LogicFHD::t_Logic_SetAPCSpeed` register `0x89bf` at `0xc1ff` (fast/on) or `0x41ff` (slow/off). |
+| `SAPC:ON` / `OFF` | **Enabled** (`OFF`) | Holds `LogicFHD::t_Logic_SetSAPCTimer` register `0x89ee` at `1` or `0`. `OFF` disables Static APC time-based dimming (on by default in stock Movie mode). |
+| `APC_OFFSET:<0..511>` | **Not set** (guard kept) | Overrides `APC_OFFSET` (`0x89c0`). `0` locks full Cell Light 20 and bypasses thermal/Eco/Movie-PWM APC throttling while keeping `DUTY2` boosts active. |
+| `SUBCONTRAST:<100..220>` | **132** | Sets Sub Contrast (register `0x8927`, value × 16) apart from the Contrast menu. `132` is factory Standard; `128` is Movie. Values past white-clipping will clip highlights. |
+| `DUTY2:<79..255>` | **200**, experimental | Writes the full 8-bit second panel duty word (`0x89da`, stock formula `79 + final_duty / 21`). See [Duty](#duty). |
 | `GAMMA:TOE` / `2.3` / `2.4` / `BT1886` | **`2.4`** | Composes a 12-bit curve onto `exeTV`'s gamma LUT and keeps white balance. Not hooked unless one of these words is present. |
 | `OSD_GAMMA:<-3..3>` | **0** | Sets the OSD Gamma slider the curve is built on. `0` is the neutral baseline. |
-| `DUMP` | **Not left on** | Logs hook state, registers, OSD Gamma, and panel temperature. Changes nothing. |
+| `DUMP` | **Not left on** | Logs hook state, all managed and diagnostic LogicFHD registers, OSD Gamma, and panel temperature. Changes nothing. |
 | `OFF` | **Not in use** | Removes the hooks and restores the firmware's register and gamma values. |
 
 The firmware writes Deep Black and Peak Stretch as a pair from Black Optimizer: `0`/`0` for Off, `3`/`0` for Dark Room, and `0`/`1` for Bright Room. This set powers on at `3`/`1` and the firmware leaves that pair alone, which is why both overrides are enabled.
@@ -194,10 +198,10 @@ The firmware writes Deep Black and Peak Stretch as a pair from Black Optimizer: 
 | Value | What that maximum means |
 |---|---|
 | **128** | The highest duty value this firmware sends to any panel type. That is Samsung's ceiling. |
-| **139** | The value on this TV, 11 counts above that ceiling. |
-| **160** | The highest number `libPDPTune` will accept. This is an input limit in the tool, not a Samsung rating and not a point that has been checked as safe. |
+| **139** | Baseline boosted value on this TV, 11 counts above Samsung's ceiling. |
+| **255** | The full 8-bit hardware register ceiling (`uxtb` in `t_Logic_SetDutyData`). Not a Samsung rating; step up incrementally while checking panel temperature and image stability. |
 
-A value above `128` is written only while `APC_OFFSET` (`0x89c0`) is `0`, which is Cell Light 20 with Eco and thermal dimming off. While automatic power control is active, the override stays at Samsung's ceiling. More light means more power, heat, and wear. Nothing here claims a measured increase in brightness or a known lifetime cost.
+A value above `128` is written only while active `APC_OFFSET` (`0x89c0`) is `0`, which is Cell Light 20 with Eco and thermal dimming off — or continuously if `APC_OFFSET:0` is explicitly passed. More light means more power, heat, and wear. Nothing here claims a measured increase in brightness or a known lifetime cost.
 
 ### Picture menu
 
@@ -235,7 +239,7 @@ These dE00 figures are calculated from a 2014 measurement of a different PN60F55
 ```sh
 . /dtv/SGO.env
 samyGOso -T -B -r -l /mnt/opt/privateer/usr/libso/libPDPTune.so \
-    UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON SUBCONTRAST:132 DUTY2:139 OSD_GAMMA:0 GAMMA:2.4 DUMP
+    UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4 DUMP
 cat /dtv/PDPTune.log
 ```
 
@@ -257,7 +261,7 @@ make lint
 make prebuilt
 ```
 
-`make test` runs both libraries against `test/fake_exetv.c` under QEMU. It checks arguments, hooks, overrides, gamma tables, and EDID rules. It does not check ARC playback or the picture on a panel.
+`make test` runs `libPDPTune` and `libDDCRAM_EDID` against `test/fake_exetv.c` and `libArcToggle` against `test/fake_exeapp.c` under QEMU. It checks arguments, hooks, overrides, gamma tables, vtable interception, and EDID rules. It does not check ARC playback or the picture on a panel.
 
 ## Disable or revert
 

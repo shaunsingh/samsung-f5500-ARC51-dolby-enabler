@@ -35,10 +35,13 @@ IMPORTS := __errno_location __isoc99_fscanf close dlclose dlopen dlsym fclose fo
            fflush fprintf fputc fwrite read snprintf sprintf strcasecmp strcmp strerror strlen strncasecmp strncmp strrchr sysconf usleep vfprintf vsnprintf \
            write
 
-# Where the firmware has what libPDPTune looks up; see g_firmware there.
+# Where the firmware has what libPDPTune (exeTV) and libArcToggle (exeAPP) look up.
 FIRMWARE := write_i2c=0x006ece6c read_i2c=0x006ec0d4 panel_temp=0x006ec3e0 support_option=0x00637550 \
             screen_instance=0x0082429c get_gamma_mode=0x00813b08 set_gamma_mode=0x00813c00 \
             logic_ic=0x01f44b34 logic_fhd_vtable=0x018aea00
+
+FIRMWARE_APP := rc_event=0x01ed2720 rc_thn20=0x01ed2718 spkr_inst=0x0111d4e8 \
+                spkr_set=0x011185e0 spkr_get=0x0111bd30 rc_vtable=0x04996838
 
 all: $(LIBS)
 
@@ -58,9 +61,13 @@ build/%.so: src/%.c src/samygo.h | build
 build/fake_exetv: test/fake_exetv.c | build
 	$(CC) $(ARCH) $(WARN) -O1 -no-pie -rdynamic $(FIRMWARE:%=-Wl,--section-start=.fw.%) $< -o $@ -lpthread -ldl
 
-test: $(LIBS) build/fake_exetv
+build/fake_exeapp: test/fake_exeapp.c | build
+	$(CC) $(ARCH) $(WARN) -O1 -no-pie -rdynamic $(FIRMWARE_APP:%=-Wl,--section-start=.fw.%) $< -o $@ -lpthread -ldl
+
+test: $(LIBS) build/fake_exetv build/fake_exeapp
 	python3 scripts/gamma_curves.py --check
 	$(QEMU) build/fake_exetv $(abspath build/libPDPTune.so build/libDDCRAM_EDID.so)
+	$(QEMU) build/fake_exeapp $(abspath build/libArcToggle.so)
 
 lint:
 	shellcheck -s sh init/*.init init/run1.sh

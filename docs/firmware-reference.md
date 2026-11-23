@@ -55,15 +55,20 @@ Native B and C tables are identical. The transfer model reproduced all 81 Native
 | Register | Meaning and observed values |
 |---|---|
 | `0x806f` | 2D drive mode: `0x05` for Movie/Relax, `0x11` for Dynamic/Standard/Natural. |
-| `0x809c` | DeepBlack: `0` or `3` in firmware paths. |
-| `0x8063` | PeakStretch: `0` or `1` in firmware paths. |
-| `0x89da` | Second duty value. `128` is the highest value Samsung sends to any panel type. |
-| `0x89c0` | APC offset. Duty boosts above `128` are allowed only while this is zero. |
-| `0x8927` | Sub Contrast, stored as the service-menu value times 16. Movie uses `128`; Standard uses `132`. |
+| `0x809c` | Black Optimizer DeepBlack: `0` or `3` in firmware paths. |
+| `0x8063` | Black Optimizer PeakStretch: `0` or `1` in firmware paths. |
+| `0x80bf` | `LogicFHD::t_Logic_SetDeepBlackMode(bool)`: `0` or `1` (enabled only for 50 Hz PAL in stock firmware). |
+| `0x8064` | `LogicFHD::t_Logic_SetPowerSaveMode(bool)`: `1` (on) or `0`/`3` (off). |
+| `0x89bf` | `LogicFHD::t_Logic_SetAPCSpeed(bool)`: `0xc1ff` (on/fast) or `0x41ff` (off/slow). |
+| `0x89c0` | APC offset (`0..511`, `(1024 - final_duty) >> 1`). Duty boosts above `128` apply only while active APC offset is `0` (either naturally or via `APC_OFFSET:0`). |
+| `0x89ee` | `LogicFHD::t_Logic_SetSAPCTimer(bool)`: `1` (on) or `0` (off, disables Static APC time-based dimming). |
+| `0x89da` | Second duty value (8-bit `0..255` via `uxtb` in `t_Logic_SetDutyData`). Computed by `PDPDimmingPanel::m_SetFinalDutyPDP` as `79 + final_duty / 21` (`final_duty` in `0..1024`), so `128` is Samsung's stock ceiling. |
+| `0x8921`–`0x8926` | `LogicFHD::t_Logic_SetWhiteBalance` (6 words: R/G/B gain and offset). |
+| `0x8927` | Sub Contrast, stored as the service-menu value times 16 (`val << 4`). Movie uses `128`; Standard uses `132`. |
 
 Samsung's Black Optimizer writes DeepBlack and PeakStretch as `0/0` for Off, `3/0` for Dark Room, and `0/1` for Bright Room. The development panel powers on with `3/1`; its `BLACK_OPTIMIZER = 3` NVRAM state skips the normal writes. `DEEPBLACK:ON` and `PEAKSTRETCH:ON` therefore preserve this set's observed startup state. Their exact visual behavior is undocumented.
 
-The duty cap of `160` in `libPDPTune` is an input limit, not a Samsung-supported operating point. Values above `128` are experimental and are inhibited whenever APC is active.
+The duty cap of `255` in `libPDPTune` is the full 8-bit hardware register ceiling, not a Samsung-supported operating point. Values above `128` are experimental and are inhibited whenever active `APC_OFFSET` (`0x89c0`) is non-zero (unless `APC_OFFSET:0` is explicitly passed).
 
 ## Gamma implementation
 
@@ -81,15 +86,22 @@ The hook preserves 2-point and 10-point white balance, keeps black at zero and p
 
 At OSD Gamma `0`, the observed firmware LUT is approximately linear. Curve selection assumes approximately 2.2 native panel response above the black floor. `2.4` is the zero-black limit of BT.1886; `TOE` changes only the low end. These assumptions require optical verification.
 
-## SPDIF audio format and the remote key
+## SPDIF / ARC audio format and the remote key
 
-`libArcToggle` uses the menu setter, not a speaker-object call. `TCSpeakerImpl::SetExternalOutMode` (`_ZN13TCSpeakerImpl18SetExternalOutModeEii`, `0x00af9a1c`) ignores its receiver, takes `TCExternalOutInfo` for output 0, and calls virtual `+0x10`. The read is `GetExternalOutMode` at `0x00af9a74`. `TPCExternalOut::EAudioType` is 0 PCM, 1 Dolby Digital, 2 DTS, 3 DTS Neo:6.
+`libArcToggle` targets `exeAPP` directly (not `exeTV`).
 
-That path reaches `ExternalOutControl::SetAudioMode` (`0x008c0e98`). The third argument is `TPCTv::EQueryType`. Query 0 programs the processor. Any other query returns without writing the hardware, so the hotkey passes 0.
+Both remote paths converge on `CRemoteControlInput::ProcessRemoteControlEvent(unsigned long type, uint16_t keycode, RemoteControlParam *param)` (`0x01ed2720`) in `exeAPP`:
 
-`SpeakerControl::SetSPDIFAudioFormat` (`0x0096aa44`) is a different object. `TPCSpeaker::Instance` returns a 0x14-byte `TPASpeaker`, whose vtable has delay and support flags and does not have that function. Calling it there would crash `exeTV`. The payload does not.
+- **Bluetooth Smart Touch remote:** `bsa_server` → `BluetoothInputDev::SendRemoteControlInputEvent` (`0x012eec48`) → `CInputManager::GetRemoteControlInput(id)->ProcessRemoteControlEvent(...)`
+- **IR remote:** MICOM UART (`0x10` packet, NOT `0x50`) → `exeTV` `KeyInputBase` → `KeyCommon::SendKeyPressInput` → vdbinder IPC → `exeAPP` `APPRemoteControlInputNative::SendRemoteControlPressKey` (`0x01cdebb8`) / `ReleaseKey` (`0x01cdf05c`) → `IRemoteControlInput::ProcessRemoteControlEvent(...)`
 
-`KeyInputBase::t_ProcessKeyValue` (`0x009038bc`), `KeyCommon::SendKeyPressInput` (`0x009004b0`), and `CInputHandler::t_OnEvent` (`0x016a75ec`) are not called when this remote is pressed. `t_ProcessNormalBuf` carries the brightness sensor (`da 14`, `da 15`, `da 16`). The remote command is the first byte of the buffer passed to `TDcPrimeMicomInterface::t_ParsePacket` (`0x011106b4`). On this set the DVR button is command `0x50`. That command also arrives while the button is idle. An armed toggle therefore changes the format during playback, with no press. Swallowing `t_ParsePacket` does not stop the universal-remote setup dialog; that text is drawn in `exeAPP`.
+All callers invoke `ProcessRemoteControlEvent` virtually through `_ZTV19CRemoteControlInput` (`0x04996838`), either via the primary slot (`+0x30`, `0x04996868` → `0x01ed2720`) or the `IRemoteControlInput` subobject thunk slot (`+0x44`, `0x0499687c` → `0x01ed2718`, `sub r0, r0, #20; b 0x01ed2720`). Replacing those two vtable pointers atomically requires no code patching and avoids ARM's ±32 MiB branch-range limit across `exeAPP`'s 121 MiB `.text` segment.
+
+`KEY_DVR` is Samsung keycode `0x0072` (`114`). When unhandled, `SMInput::CallRemoteControlEventDelegator` delivers it to `CTvApplicationManager::m_OnKeyDirectMBR` (`0x02274e6c`), which checks `0x72`, `0x10f`, `0x112`, and `0x115` and launches `APP_MBR` (`0x25`, `0x534`) displaying *"This button will only work after the universal remote control has been set up. Do you want to set it up now?"* (string `0x05f1076c` in `g_MBRWStringEngUS`). Swallowing `0x72` press, repeat, and release inside `ProcessRemoteControlEvent` prevents `m_OnKeyDirectMBR` from ever running.
+
+Audio format switching uses `exeAPP`'s own `TCSpeakerProxy::GetInstance(0)` (`0x0111d4e8`), `GetExternalOutMode` (`0x0111bd30`), and `SetExternalOutMode` (`0x011185e0`) over vdbinder to `exeTV`'s `TCSpeakerImpl::SetExternalOutMode` → `ExternalOutControl::SetAudioMode` with query `0` (`0` = PCM, `1` = Dolby Digital, `2` = DTS, `3` = DTS Neo:6).
+
+*(Earlier attempts hooked `TDcPrimeMicomInterface::t_ParsePacket` in `exeTV` on packet byte `0x50` and patched `RVUCKey::CRVUCNotAvailableKey::ShowNAPopUpMessage` in `exeAPP`. In `t_ParsePacket`, `0x50` is a generic MICOM ACK/status frame that arrives periodically while idle, and `RVUCKey` belongs to the DirecTV RVU client rather than MBR universal remote control.)*
 
 ## Audio capture and content-aware routing
 

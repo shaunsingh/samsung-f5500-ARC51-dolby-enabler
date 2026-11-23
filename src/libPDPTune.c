@@ -9,11 +9,19 @@
  *                           (6-axis CMS) and Expert Pattern in the menu
  *   DRIVE:STANDARD          drive Movie and Relax with the waveform the
  *                           firmware uses for Dynamic, Standard and Natural
- *   DEEPBLACK:ON|OFF        hold the logic board's DeepBlack on or off
- *   PEAKSTRETCH:ON|OFF      hold the logic board's PeakStretch on or off
- *   DUTY2:<79..160>         replace this panel's fixed duty_2 of 128 (boosts
- *                           above 128 apply only when APC_OFFSET is 0)
- *   SUBCONTRAST:<100..160>  replace Sub Contrast (factory: 128 Movie, 132 Std)
+ *   DEEPBLACK:ON|OFF        hold Black Optimizer DeepBlack (0x809c: 3 / 0)
+ *   PEAKSTRETCH:ON|OFF      hold Black Optimizer PeakStretch (0x8063: 1 / 0)
+ *   DEEPBLACK_MODE:ON|OFF   hold LogicFHD DeepBlackMode (0x80bf: 1 / 0; stock
+ *                           firmware only enables this on 50 Hz PAL signals)
+ *   POWERSAVE:ON|OFF        hold LogicFHD PowerSaveMode (0x8064: 1 / 0)
+ *   APCSPEED:ON|OFF         hold LogicFHD APC speed (0x89bf: 0xc1ff / 0x41ff)
+ *   SAPC:ON|OFF             hold LogicFHD Static APC timer (0x89ee: 1 / 0)
+ *   APC_OFFSET:<0..511>     override APC_OFFSET (0x89c0; 0 = full Cell Light 20
+ *                           with thermal/Eco/Movie-PWM APC dimming bypassed)
+ *   DUTY2:<79..255>         replace this panel's fixed duty_2 of 128 (0x89da;
+ *                           boosts >128 apply while active APC_OFFSET is 0)
+ *   SUBCONTRAST:<100..220>  replace Sub Contrast (0x8927, val << 4; factory:
+ *                           128 Movie, 132 Standard)
  *   GAMMA:TOE|2.3|2.4|BT1886  compose a 12-bit EOTF curve onto exeTV's gamma
  *                           LUT in MDrv_PNL_SetGammaTbl (opt-in, auto-synced)
  *   OSD_GAMMA:<-3..3>       set exeTV's OSD Gamma slider (e.g. 0 for neutral)
@@ -34,7 +42,7 @@
 #include "gamma_tables.h"
 #include "samygo.h"
 
-#define VERSION  "2.3.0"
+#define VERSION  "2.4.0"
 #define LOG      "/dtv/PDPTune.log"
 #define say(...) sgo_log(LOG, __VA_ARGS__)
 
@@ -105,17 +113,34 @@ static bool firmware_matches(void)
 
 /*
  * Logic board registers this library can override. The firmware rewrites them
- * when the picture mode, the Black Optimizer or the cell light changes, so an
- * override has to sit in the write path to last.
+ * when the picture mode, the Black Optimizer, the cell light, or APC changes,
+ * so an override has to sit in the write path to last.
+ *
+ * K_APC_OFFSET MUST precede K_DUTY2 so sync_knobs updates g_apc_offset before
+ * deciding whether a DUTY2 > 128 boost applies.
  */
-enum { K_DRIVE, K_DEEP_BLACK, K_PEAK_STRETCH, K_DUTY2, K_SUB_CONTRAST, K_COUNT };
+enum {
+    K_DRIVE,
+    K_DEEP_BLACK,
+    K_PEAK_STRETCH,
+    K_DEEP_BLACK_MODE,
+    K_POWER_SAVE,
+    K_APC_SPEED,
+    K_APC_OFFSET,
+    K_SAPC_TIMER,
+    K_DUTY2,
+    K_SUB_CONTRAST,
+    K_COUNT
+};
 enum { KEEP = -1, ANY = -1, UNKNOWN = -1 };
 
-#define DRIVE_MOVIE     0x05 /* 2D Movie and Relax */
-#define DRIVE_STANDARD  0x11 /* 2D Dynamic, Standard and Natural */
-#define DEEP_BLACK_ON   3    /* Black Optimizer "Dark Room" */
-#define PEAK_STRETCH_ON 1    /* Black Optimizer "Bright Room" */
-#define DUTY2_FIXED     0x80 /* what a 60" panel gets whenever it is lit */
+#define DRIVE_MOVIE     0x05   /* 2D Movie and Relax */
+#define DRIVE_STANDARD  0x11   /* 2D Dynamic, Standard and Natural */
+#define DEEP_BLACK_ON   3      /* Black Optimizer "Dark Room" */
+#define PEAK_STRETCH_ON 1      /* Black Optimizer "Bright Room" */
+#define APC_SPEED_ON    0xc1ff /* LogicFHD::t_Logic_SetAPCSpeed(true) */
+#define APC_SPEED_OFF   0x41ff /* LogicFHD::t_Logic_SetAPCSpeed(false) */
+#define DUTY2_FIXED     0x80   /* what a 60" panel gets whenever it is lit */
 
 static struct knob {
     const char *name;
@@ -127,11 +152,16 @@ static struct knob {
     int         sent;  /* what the logic board was last given */
 } g_knobs[K_COUNT] = {
     /* The logic board reports status in the high byte of DrivingMode. */
-    [K_DRIVE]        = { "DrivingMode", 0x806f, 0x00ff, DRIVE_MOVIE, KEEP, UNKNOWN, UNKNOWN },
-    [K_DEEP_BLACK]   = { "DeepBlack",   0x809c, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
-    [K_PEAK_STRETCH] = { "PeakStretch", 0x8063, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
-    [K_DUTY2]        = { "duty_2",      0x89da, 0x00ff, DUTY2_FIXED, KEEP, UNKNOWN, UNKNOWN },
-    [K_SUB_CONTRAST] = { "SubContrast", 0x8927, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_DRIVE]           = { "DrivingMode",   0x806f, 0x00ff, DRIVE_MOVIE, KEEP, UNKNOWN, UNKNOWN },
+    [K_DEEP_BLACK]      = { "DeepBlack",     0x809c, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_PEAK_STRETCH]    = { "PeakStretch",   0x8063, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_DEEP_BLACK_MODE] = { "DeepBlackMode", 0x80bf, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_POWER_SAVE]      = { "PowerSave",     0x8064, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_APC_SPEED]       = { "APCSpeed",      0x89bf, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_APC_OFFSET]      = { "APCOffset",     0x89c0, 0x01ff, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_SAPC_TIMER]      = { "SAPCTimer",     0x89ee, 0x0001, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_DUTY2]           = { "duty_2",        0x89da, 0x00ff, DUTY2_FIXED, KEEP, UNKNOWN, UNKNOWN },
+    [K_SUB_CONTRAST]    = { "SubContrast",   0x8927, 0xfff0, ANY,         KEEP, UNKNOWN, UNKNOWN },
 };
 
 /* Serialises the workers and the knob state they share with the write hook. */
@@ -359,13 +389,6 @@ static int read_i2c(void *logic, uint16_t reg, uint16_t *value)
 
 static int on_write_i2c(void *logic, uint16_t reg, uint16_t value)
 {
-    if (reg == REG_APC_OFFSET) {
-        pthread_mutex_lock(&g_lock);
-        g_apc_offset = value;
-        pthread_mutex_unlock(&g_lock);
-        return write_i2c(logic, reg, value);
-    }
-
     struct knob *knob = knob_for(reg);
     if (!knob)
         return write_i2c(logic, reg, value);
@@ -374,8 +397,11 @@ static int on_write_i2c(void *logic, uint16_t reg, uint16_t value)
     knob->stock = value;
     uint16_t want = tuned(knob, value);
     int      result = write_i2c(logic, reg, want);
-    if (result == 0)
+    if (result == 0) {
         knob->sent = want;
+        if (knob == &g_knobs[K_APC_OFFSET])
+            g_apc_offset = want;
+    }
     pthread_mutex_unlock(&g_lock);
     return result;
 }
@@ -523,13 +549,13 @@ static void sync_knobs(void *logic)
 {
     uint16_t apc;
     if (read_i2c(logic, REG_APC_OFFSET, &apc) == 0)
-        g_apc_offset = apc;
+        g_apc_offset = apc & 0x01ffu;
 
     for (struct knob *knob = g_knobs; knob < g_knobs + K_COUNT; knob++) {
         if (knob->stock == UNKNOWN) {
             uint16_t value;
             if (read_i2c(logic, knob->reg, &value) != 0) {
-                say("%-11s 0x%04x: cannot be read", knob->name, knob->reg);
+                say("%-13s 0x%04x: cannot be read", knob->name, knob->reg);
                 continue;
             }
             knob->stock = knob->sent = value & knob->mask;
@@ -540,9 +566,11 @@ static void sync_knobs(void *logic)
             if (write_i2c(logic, knob->reg, want) == 0)
                 knob->sent = want;
             else
-                say("%-11s 0x%04x: cannot be written", knob->name, knob->reg);
+                say("%-13s 0x%04x: cannot be written", knob->name, knob->reg);
         }
-        say("%-11s 0x%04x: firmware 0x%04x, panel 0x%04x", knob->name, knob->reg, (unsigned)knob->stock,
+        if (knob == &g_knobs[K_APC_OFFSET] && knob->sent != UNKNOWN)
+            g_apc_offset = knob->sent;
+        say("%-13s 0x%04x: firmware 0x%04x, panel 0x%04x", knob->name, knob->reg, (unsigned)knob->stock,
             (unsigned)knob->sent);
     }
 }
@@ -664,9 +692,9 @@ static void dump_register(void *logic, const char *name, uint16_t reg)
 {
     uint16_t value;
     if (read_i2c(logic, reg, &value) == 0)
-        say("dump %-11s 0x%04x = 0x%04x", name, reg, value);
+        say("dump %-13s 0x%04x = 0x%04x", name, reg, value);
     else
-        say("dump %-11s 0x%04x: cannot be read", name, reg);
+        say("dump %-13s 0x%04x: cannot be read", name, reg);
 }
 
 static void dump(void *logic)
@@ -680,8 +708,14 @@ static void dump(void *logic)
 
     for (int i = 0; i < K_COUNT; i++)
         dump_register(logic, g_knobs[i].name, g_knobs[i].reg);
-    dump_register(logic, "APC offset", 0x89c0);
-    dump_register(logic, "SubBright", 0x8926);
+    dump_register(logic, "FilmMode", 0x806d);
+    dump_register(logic, "DCRDelayIn", 0x88ca);
+    dump_register(logic, "WB_R_Gain", 0x8921);
+    dump_register(logic, "WB_R_Off", 0x8922);
+    dump_register(logic, "WB_G_Gain", 0x8923);
+    dump_register(logic, "WB_G_Off", 0x8924);
+    dump_register(logic, "WB_B_Gain", 0x8925);
+    dump_register(logic, "WB_B_Off", 0x8926);
 
     void *screen = ((screen_instance_fn *)g_firmware[F_SCREEN_INSTANCE].addr)(0);
     int   osd_gamma;
@@ -734,15 +768,20 @@ static const char *value_of(const char *word, const char *key)
     return strncasecmp(word, key, length) == 0 && word[length] == ':' ? word + length + 1 : NULL;
 }
 
-static bool parse_switch(const char *text, int on, int *out)
+static bool parse_switch_pair(const char *text, int on, int off, int *out)
 {
     if (strcasecmp(text, "ON") == 0)
         *out = on;
     else if (strcasecmp(text, "OFF") == 0)
-        *out = 0;
+        *out = off;
     else
         return false;
     return true;
+}
+
+static bool parse_switch(const char *text, int on, int *out)
+{
+    return parse_switch_pair(text, on, 0, out);
 }
 
 static bool parse_number(const char *text, int low, int high, int *out)
@@ -800,12 +839,22 @@ static bool parse_word(const char *word, struct request *request)
         return parse_switch(value, DEEP_BLACK_ON, &request->to[K_DEEP_BLACK]);
     if ((value = value_of(word, "PEAKSTRETCH")))
         return parse_switch(value, PEAK_STRETCH_ON, &request->to[K_PEAK_STRETCH]);
+    if ((value = value_of(word, "DEEPBLACK_MODE")))
+        return parse_switch(value, 1, &request->to[K_DEEP_BLACK_MODE]);
+    if ((value = value_of(word, "POWERSAVE")))
+        return parse_switch(value, 1, &request->to[K_POWER_SAVE]);
+    if ((value = value_of(word, "APCSPEED")))
+        return parse_switch_pair(value, APC_SPEED_ON, APC_SPEED_OFF, &request->to[K_APC_SPEED]);
+    if ((value = value_of(word, "SAPC")))
+        return parse_switch(value, 1, &request->to[K_SAPC_TIMER]);
+    if ((value = value_of(word, "APC_OFFSET")))
+        return parse_number(value, 0, 511, &request->to[K_APC_OFFSET]);
     if ((value = value_of(word, "DUTY2")))
-        return parse_number(value, 79, 160, &request->to[K_DUTY2]);
+        return parse_number(value, 79, 255, &request->to[K_DUTY2]);
     if ((value = value_of(word, "SUBCONTRAST"))) {
         /* The register holds the factory menu's Sub Contrast shifted left by 4. */
         int level;
-        if (!parse_number(value, 100, 160, &level))
+        if (!parse_number(value, 100, 220, &level))
             return false;
         request->to[K_SUB_CONTRAST] = level << 4;
         return true;
@@ -824,16 +873,18 @@ static bool parse_word(const char *word, struct request *request)
     return false;
 }
 
-#define MAX_WORDS 16
+#define MAX_WORDS 24
 
 void lib_init(void *handle, const char *libpath)
 {
     (void)handle;
 
-    struct request request = { .osd_gamma = OSD_GAMMA_KEEP, .to = { KEEP, KEEP, KEEP, KEEP, KEEP } };
+    struct request request = { .osd_gamma = OSD_GAMMA_KEEP };
+    for (int i = 0; i < K_COUNT; i++)
+        request.to[i] = KEEP;
     const char    *argv[MAX_WORDS];
     int            argc = sgo_args(libpath, argv, MAX_WORDS);
-    char           words[160] = "";
+    char           words[256] = "";
     size_t         length = 0;
 
     if (argc > MAX_WORDS) {

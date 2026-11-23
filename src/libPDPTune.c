@@ -25,6 +25,11 @@
  *   GAMMA:TOE|2.3|2.4|BT1886  compose a 12-bit EOTF curve onto exeTV's gamma
  *                           LUT in MDrv_PNL_SetGammaTbl (opt-in, auto-synced)
  *   OSD_GAMMA:<-3..3>       set exeTV's OSD Gamma slider (e.g. 0 for neutral)
+ *   PATTERN:OFF|BLACK|WHITE|RED|GREEN|BLUE|BOX9|SCROLL
+ *                           LogicFHD hardware test pattern (0x8114; reverts
+ *                           to OFF when omitted or on OFF)
+ *   CINEMA_SMOOTH:ON|OFF    toggle MStar 24p->48Hz FRC table in libUTOPIA.so
+ *                           (50/60 Hz inputs stay 1:1 untouched)
  *   OFF                     nothing: stock registers, hooks removed
  *   DUMP                    log the registers involved; changes nothing
  *
@@ -42,7 +47,7 @@
 #include "gamma_tables.h"
 #include "samygo.h"
 
-#define VERSION  "2.4.0"
+#define VERSION  "2.5.0"
 #define LOG      "/dtv/PDPTune.log"
 #define say(...) sgo_log(LOG, __VA_ARGS__)
 
@@ -84,9 +89,12 @@ typedef int     read_i2c_fn(void *logic, uint16_t reg, uint16_t *value);
 typedef int     panel_temp_fn(void *logic, int *celsius);
 typedef int     support_option_fn(void *self, int option, bool *supported);
 typedef void   *screen_instance_fn(int screen);
-typedef int     get_gamma_mode_fn(void *screen, int *mode);
-typedef int     set_gamma_mode_fn(void *screen, int mode);
-typedef uint8_t set_gamma_fn(int lut_type, uint8_t **gamma_tab, int map_mode);
+typedef int      get_gamma_mode_fn(void *screen, int *mode);
+typedef int      set_gamma_mode_fn(void *screen, int mode);
+typedef uint8_t  set_gamma_fn(int lut_type, uint8_t **gamma_tab, int map_mode);
+typedef uint8_t  get_filmmode_fn(void);
+typedef uint8_t  set_filmmode_fn(uint8_t enable);
+typedef uint16_t get_vfreq_fn(void);
 
 #define EXETV_BASE            0x8000u /* lowest address of the exeTV image */
 #define OPTION_EXPERT_PATTERN 0x49    /* IProductInfo::ProductSupportOption_k: Expert Pattern */
@@ -130,6 +138,7 @@ enum {
     K_SAPC_TIMER,
     K_DUTY2,
     K_SUB_CONTRAST,
+    K_PATTERN,
     K_COUNT
 };
 enum { KEEP = -1, ANY = -1, UNKNOWN = -1 };
@@ -141,6 +150,14 @@ enum { KEEP = -1, ANY = -1, UNKNOWN = -1 };
 #define APC_SPEED_ON    0xc1ff /* LogicFHD::t_Logic_SetAPCSpeed(true) */
 #define APC_SPEED_OFF   0x41ff /* LogicFHD::t_Logic_SetAPCSpeed(false) */
 #define DUTY2_FIXED     0x80   /* what a 60" panel gets whenever it is lit */
+#define PATTERN_OFF     0x0000
+#define PATTERN_BLACK   0x0100
+#define PATTERN_WHITE   0x0101
+#define PATTERN_RED     0x0102
+#define PATTERN_GREEN   0x0103
+#define PATTERN_BLUE    0x0104
+#define PATTERN_BOX9    0x0106
+#define PATTERN_SCROLL  0x011f
 
 static struct knob {
     const char *name;
@@ -162,6 +179,7 @@ static struct knob {
     [K_SAPC_TIMER]      = { "SAPCTimer",     0x89ee, 0x0001, ANY,         KEEP, UNKNOWN, UNKNOWN },
     [K_DUTY2]           = { "duty_2",        0x89da, 0x00ff, DUTY2_FIXED, KEEP, UNKNOWN, UNKNOWN },
     [K_SUB_CONTRAST]    = { "SubContrast",   0x8927, 0xfff0, ANY,         KEEP, UNKNOWN, UNKNOWN },
+    [K_PATTERN]         = { "TestPattern",   0x8114, 0xffff, ANY,         KEEP, UNKNOWN, UNKNOWN },
 };
 
 /* Serialises the workers and the knob state they share with the write hook. */
@@ -578,11 +596,43 @@ static void sync_knobs(void *logic)
 struct request {
     bool configure; /* false leaves the configuration as it is */
     bool dump;
+    bool off;
     bool unlock;
     int  gamma;
     int  osd_gamma;
+    int  cinema_smooth; /* KEEP, 0, or 1 */
     int  to[K_COUNT];
 };
+
+static int g_cinema_smooth_stock = UNKNOWN;
+
+static void apply_cinema_smooth(int want, bool restore_if_off)
+{
+    int target = want;
+    if (target == KEEP && restore_if_off && g_cinema_smooth_stock != UNKNOWN)
+        target = g_cinema_smooth_stock;
+    if (target == KEEP)
+        return;
+
+    get_filmmode_fn *get_fm = (get_filmmode_fn *)dlsym(RTLD_DEFAULT, "_Z29mbrg_outputsource_getfilmmodev");
+    set_filmmode_fn *set_fm = (set_filmmode_fn *)dlsym(RTLD_DEFAULT, "_Z29mbrg_outputsource_setfilmmodeh");
+    if (!get_fm || !set_fm) {
+        say("CinemaSmooth unavailable (mbrg_outputsource_setfilmmode not exported)");
+        return;
+    }
+    int cur = get_fm() ? 1 : 0;
+    if (g_cinema_smooth_stock == UNKNOWN)
+        g_cinema_smooth_stock = cur;
+    if (cur != target) {
+        uint8_t ok = set_fm((uint8_t)target);
+        int     now = get_fm() ? 1 : 0;
+        say("CinemaSmooth (24p->48Hz): %d -> %d (ok=%u now=%d)", cur, target, (unsigned)ok, now);
+    } else {
+        say("CinemaSmooth (24p->48Hz): already %d", cur);
+    }
+    if (restore_if_off)
+        g_cinema_smooth_stock = UNKNOWN;
+}
 
 /*
  * Asks SsScreenBase to apply OSD Gamma (either a requested value or the saved
@@ -725,6 +775,15 @@ static void dump(void *logic)
     int celsius;
     if (((panel_temp_fn *)g_firmware[F_PANEL_TEMP].addr)(logic, &celsius) == 0)
         say("dump panel temperature %d C", celsius);
+
+    get_filmmode_fn *get_fm = (get_filmmode_fn *)dlsym(RTLD_DEFAULT, "_Z29mbrg_outputsource_getfilmmodev");
+    if (get_fm)
+        say("dump CinemaSmooth (24p->48Hz) %d", get_fm() ? 1 : 0);
+    get_vfreq_fn *get_vf = (get_vfreq_fn *)dlsym(RTLD_DEFAULT, "MApi_XC_GetOutputVFreqX100");
+    if (get_vf) {
+        unsigned vf = get_vf();
+        say("dump OutputVFreq %u.%02u Hz", vf / 100u, vf % 100u);
+    }
 }
 
 /*
@@ -750,6 +809,13 @@ static void *worker(void *arg)
             pthread_mutex_lock(&g_lock);
             if (g_gamma_mode != GAMMA_NONE && g_gamma_have_stock)
                 say("gamma %s applied to firmware LUT", g_gamma_names[g_gamma_mode]);
+        }
+        if (request->configure && (request->cinema_smooth != KEEP || request->off)) {
+            int  cs = request->cinema_smooth;
+            bool off = request->off;
+            pthread_mutex_unlock(&g_lock);
+            apply_cinema_smooth(cs, off);
+            pthread_mutex_lock(&g_lock);
         }
         if (request->dump)
             dump(logic);
@@ -825,8 +891,10 @@ static bool parse_word(const char *word, struct request *request)
     }
     request->configure = true;
 
-    if (strcasecmp(word, "OFF") == 0)
+    if (strcasecmp(word, "OFF") == 0) {
+        request->off = true;
         return true;
+    }
     if (strcasecmp(word, "UNLOCK") == 0) {
         request->unlock = true;
         return true;
@@ -870,6 +938,30 @@ static bool parse_word(const char *word, struct request *request)
     }
     if ((value = value_of(word, "OSD_GAMMA")))
         return parse_signed_number(value, -3, 3, &request->osd_gamma);
+    if ((value = value_of(word, "PATTERN"))) {
+        static const struct {
+            const char *name;
+            int         val;
+        } pats[] = {
+            { "OFF",    PATTERN_OFF },
+            { "BLACK",  PATTERN_BLACK },
+            { "WHITE",  PATTERN_WHITE },
+            { "RED",    PATTERN_RED },
+            { "GREEN",  PATTERN_GREEN },
+            { "BLUE",   PATTERN_BLUE },
+            { "BOX9",   PATTERN_BOX9 },
+            { "SCROLL", PATTERN_SCROLL },
+        };
+        for (size_t i = 0; i < sizeof pats / sizeof pats[0]; i++) {
+            if (strcasecmp(value, pats[i].name) == 0) {
+                request->to[K_PATTERN] = pats[i].val;
+                return true;
+            }
+        }
+        return false;
+    }
+    if ((value = value_of(word, "CINEMA_SMOOTH")))
+        return parse_switch(value, 1, &request->cinema_smooth);
     return false;
 }
 
@@ -879,7 +971,7 @@ void lib_init(void *handle, const char *libpath)
 {
     (void)handle;
 
-    struct request request = { .osd_gamma = OSD_GAMMA_KEEP };
+    struct request request = { .osd_gamma = OSD_GAMMA_KEEP, .cinema_smooth = KEEP };
     for (int i = 0; i < K_COUNT; i++)
         request.to[i] = KEEP;
     const char    *argv[MAX_WORDS];

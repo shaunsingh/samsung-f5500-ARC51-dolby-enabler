@@ -21,11 +21,30 @@ The Beam's status endpoint is `http://BEAM_IP:1400/status/zp`. Samsung's OSD may
 - Beam `HTAudioInCode` tracked every toggle live between `84934713` (Dolby Digital 5.1) and `33554434` (Stereo PCM 2.0).
 - Zero universal-remote setup prompts appeared, and zero idle events were logged.
 
-## Plasma register tuning (`libPDPTune` 2.4.0)
+## Plasma register tuning (`libPDPTune` 2.5.0)
 
-Stock Movie-mode 60 Hz readback on HDMI3 at 38 °C showed `0x806f = 0x0105`, `0x80bf = 0x0000` (DeepBlackMode off on 60 Hz), `0x89ee = 0x0001` (Static APC timer active), `0x89c0 = 0x0000` (APC offset 0), `0x89da = 0x0080` (`128`), and `0x8927 = 0x0800` (`128`).
+Stock Movie-mode 60 Hz readback on HDMI3 at 38 °C showed `0x806f = 0x0105`, `0x80bf = 0x0000` (DeepBlackMode off on 60 Hz), `0x89ee = 0x0001` (Static APC timer active), `0x89c0 = 0x0000` (APC offset 0), `0x89da = 0x0080` (`128`), `0x8927 = 0x0800` (`128`), `CinemaSmooth = 0`, and `OutputVFreq = 60.00 Hz`.
 
-Applying `UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:200 OSD_GAMMA:0 GAMMA:2.4` read back `0x806f = 0x0111`, `0x809c = 0x0003`, `0x8063 = 0x0001`, `0x80bf = 0x0001`, `0x8064 = 0x0000`, `0x89bf = 0x41ff`, `0x89c0 = 0x0000`, `0x89ee = 0x0000`, `0x89da = 0x00c8` (`200`), and `0x8927 = 0x0840` (`132`). `DEEPBLACK_MODE:ON` ran flicker-free at 60 Hz, and stepping `DUTY2` across `175`, `215`, and `255` (`0x00ff`) held panel temperature steady at 42–43 °C with `APCOffset = 0x0000` and the thermal APC guard kept intact; `200` was persisted as a conservative high-duty operating point.
+### Optical sweep (`scripts/optical_sweep.py`, Full-Field White `0x8114 = 0x0101`)
+
+Unclipped median-filtered differential photometry (2× pass average per step, panel steady at 44 °C, `APCOffset = 0x0000`):
+
+| Sweep / Setting | Relative Luminance | Spread | Notes |
+|---|---:|---:|---|
+| `DUTY2:128` (stock baseline) | `100.0%` | — | Reference (`DRIVE:STANDARD`) |
+| `DUTY2:139` | `99.3%` | `±2.3%` | No measurable full-field gain |
+| **`DUTY2:155`** | **`130.5%`** | **`±0.9%`** | **Reproducible peak before fold-back; cleanest RGB balance** |
+| `DUTY2:175` | `122.8%` | `±1.4%` | Fold-back begins |
+| `DUTY2:195` | `111.1%` | `±1.2%` | Trough (`-15%` vs `155`) |
+| `DUTY2:215` | `110.3%` | `±4.0%` | Trough |
+| `DUTY2:235` | `123.4%` | `±17.6%` | High subfield rolling-shutter variance |
+| `DUTY2:255` | `132.8%` | `±7.2%` | Same ceiling as `155` with higher variance |
+| Stock Movie (`128`, `SubC:128`) | `100.0%` | — | Mode A/B baseline |
+| `DRIVE:STANDARD` + `DEEPBLACK_MODE:OFF` (`200`) | `149.9%` | `±3.9%` | |
+| **`DRIVE:STANDARD` + `DEEPBLACK_MODE:ON` (`200`)** | **`163.7%`** | **`±3.5%`** | **+13.8% brighter than `DBM:OFF`; flicker-free at 60 Hz** |
+| `DRIVE:STANDARD` + `SUBCONTRAST:150` (`200`) | `120.6%` | `±2.6%` | High SubContrast triggered ABL (`-26%` vs `132`) |
+
+Final persisted configuration (`UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:ON DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF SUBCONTRAST:132 DUTY2:155 OSD_GAMMA:0 GAMMA:2.4 CINEMA_SMOOTH:ON`) verified live: `0x806f = 0x0111`, `0x809c = 0x0003`, `0x8063 = 0x0001`, `0x80bf = 0x0001`, `0x8064 = 0x0000`, `0x89bf = 0x41ff`, `0x89c0 = 0x0000`, `0x89ee = 0x0000`, `0x89da = 0x009b` (`155`), `0x8927 = 0x0840` (`132`), `0x8114 = 0x0000`, `CinemaSmooth = 1`, `OutputVFreq = 60.00 Hz`, 44 °C.
 
 ## Picture menu used with this configuration
 

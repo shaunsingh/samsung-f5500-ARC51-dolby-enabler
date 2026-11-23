@@ -79,8 +79,29 @@ enum {
     SAPC_TIMER = 0x89ee,
     DUTY2 = 0x89da,
     SUB_CONTRAST = 0x8927,
+    TEST_PATTERN = 0x8114,
     OTHER = 0x803d
 };
+
+static _Atomic uint8_t g_filmmode = 0;
+
+uint8_t fake_get_filmmode(void) __asm__("_Z29mbrg_outputsource_getfilmmodev");
+uint8_t fake_get_filmmode(void)
+{
+    return g_filmmode;
+}
+
+uint8_t fake_set_filmmode(uint8_t enable) __asm__("_Z29mbrg_outputsource_setfilmmodeh");
+uint8_t fake_set_filmmode(uint8_t enable)
+{
+    g_filmmode = enable ? 1 : 0;
+    return 1;
+}
+
+uint16_t MApi_XC_GetOutputVFreqX100(void)
+{
+    return g_filmmode ? 4795 : 5994;
+}
 
 static struct { void *vptr; } g_logic = { &vtable_logic_fhd[2] };
 static int                    g_screen_dummy;
@@ -417,8 +438,8 @@ static void test_pdptune(const char *libpath)
     CHECK(g_panel[DEEP_BLACK] == 3 && g_panel[PEAK_STRETCH] == 1);
 
     puts("extended max-performance registers override APC/SAPC/DeepBlackMode/PowerSave and restore on OFF");
-    inject("DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF APC_OFFSET:0 DUTY2:200 SUBCONTRAST:140");
-    EVENTUALLY(g_panel[DUTY2] == 200 && g_panel[SUB_CONTRAST] == (140 << 4));
+    inject("DEEPBLACK_MODE:ON POWERSAVE:OFF APCSPEED:OFF SAPC:OFF APC_OFFSET:0 DUTY2:200 SUBCONTRAST:140 PATTERN:BOX9 CINEMA_SMOOTH:ON");
+    EVENTUALLY(g_panel[DUTY2] == 200 && g_panel[SUB_CONTRAST] == (140 << 4) && g_panel[TEST_PATTERN] == 0x0106 && g_filmmode == 1);
     CHECK(g_panel[DEEP_BLACK_MODE] == 1 && g_panel[POWER_SAVE] == 0);
     CHECK(g_panel[APC_SPEED] == 0x41ff && g_panel[SAPC_TIMER] == 0 && g_panel[APC_OFFSET] == 0);
     /* With APC_OFFSET:0 explicitly armed, firmware thermal/Eco dimming is overridden and DUTY2 stays boosted. */
@@ -429,15 +450,15 @@ static void test_pdptune(const char *libpath)
 
     puts("OFF restores what the firmware last asked for");
     inject("DEEPBLACK:OFF");
-    EVENTUALLY(g_panel[DUTY2] == 0x80);
+    EVENTUALLY(g_panel[DUTY2] == 0x80 && g_panel[TEST_PATTERN] == 0);
     CHECK(g_panel[DEEP_BLACK] == 0 && g_panel[PEAK_STRETCH] == 1 && g_panel[SUB_CONTRAST] == 0x0800);
     CHECK(g_panel[DEEP_BLACK_MODE] == 0 && g_panel[POWER_SAVE] == 1 && g_panel[APC_SPEED] == 0xc1ff);
     CHECK(g_panel[SAPC_TIMER] == 1 && g_panel[APC_OFFSET] == 50);
     fw_write_i2c(&g_logic, APC_OFFSET, 0);
     inject("OFF");
-    EVENTUALLY(!hooked(fw_write_i2c));
+    EVENTUALLY(!hooked(fw_write_i2c) && g_filmmode == 0);
     CHECK(g_panel[DRIVE] == 0x05 && g_panel[DEEP_BLACK] == 0 && g_panel[PEAK_STRETCH] == 1);
-    CHECK(g_panel[DUTY2] == 0x80 && g_panel[SUB_CONTRAST] == 0x0800 && !hooked(fw_support_option));
+    CHECK(g_panel[DUTY2] == 0x80 && g_panel[SUB_CONTRAST] == 0x0800 && g_panel[TEST_PATTERN] == 0 && !hooked(fw_support_option));
 
     puts("opt-in 12-bit gamma LUT auto-syncs on boot, composes onto firmware table, and restores on OFF");
     CHECK(!gamma_hooked() && g_osd_gamma == -1);

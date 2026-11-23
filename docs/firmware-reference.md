@@ -65,6 +65,11 @@ Native B and C tables are identical. The transfer model reproduced all 81 Native
 | `0x89da` | Second duty value (8-bit `0..255` via `uxtb` in `t_Logic_SetDutyData`). Computed by `PDPDimmingPanel::m_SetFinalDutyPDP` as `79 + final_duty / 21` (`final_duty` in `0..1024`), so `128` is Samsung's stock ceiling. |
 | `0x8921`–`0x8926` | `LogicFHD::t_Logic_SetWhiteBalance` (6 words: R/G/B gain and offset). |
 | `0x8927` | Sub Contrast, stored as the service-menu value times 16 (`val << 4`). Movie uses `128`; Standard uses `132`. |
+| `0x8114` | LogicFHD hardware test pattern (`t_Logic_SetTestPattern`): `0x0000` off, `0x0100` black, `0x0101` full white, `0x0102`–`0x0104` R/G/B, `0x0106` 9-point white boxes, `0x011f` moving scroll bar. |
+
+## 24p Cinema Smooth (`libUTOPIA.so` FRC table)
+
+`mbrg_outputsource_setfilmmode(uint8_t)` (`0x42b72ba0` in `libUTOPIA.so`) controls the MStar X12 frame-rate conversion table (`0x42cf7550`, 5 entries). Its default entry for `16.0–24.5 Hz` is `0x21` (2:1 → 48 Hz, doubled to 96 Hz by the plasma driver), while `49.0+ Hz` is `0x11` (1:1 passthrough). When `setfilmmode(0)` is called (the F5500 stock state), entry 1 is overwritten to `0x52` (5:2 → 60 Hz 3:2 pulldown). Calling `mbrg_outputsource_setfilmmode(1)` restores 2:1 48 Hz output for 24p sources without altering 50/60 Hz timings. Live output frequency is read via `MApi_XC_GetOutputVFreqX100`.
 
 Samsung's Black Optimizer writes DeepBlack and PeakStretch as `0/0` for Off, `3/0` for Dark Room, and `0/1` for Bright Room. The development panel powers on with `3/1`; its `BLACK_OPTIMIZER = 3` NVRAM state skips the normal writes. `DEEPBLACK:ON` and `PEAKSTRETCH:ON` therefore preserve this set's observed startup state. Their exact visual behavior is undocumented.
 

@@ -102,7 +102,7 @@ Leave the source in its normal limited RGB range, with the TV's HDMI black level
 
 ### Audio limitations
 
-- **Automatic Stereo/Surround switching for Jellyfin**: While the TV itself exposes only stereo PCM capture and cannot inspect 5.1 channels inside a DD bitstream, [`scripts/jellyfin_arc_sync.py`](scripts/jellyfin_arc_sync.py) polls a local Jellyfin server's `/Sessions` API and invokes `libArcToggle` (`PCM` for `<= 2ch`, `DD` for `>= 3ch`) whenever a new media item or audio stream begins on Xbox, without overriding manual DVR button presses mid-item.
+- **Automatic Stereo/Surround switching for Jellyfin**: Because an Xbox configured for global Dolby Digital outputs a continuous 5.1 AC-3 bitstream even for 2.0 stereo tracks, the TV's HDMI receiver cannot distinguish stereo from 5.1 on the wire alone (unless the source passes through raw LPCM 2.0). [`scripts/jellyfin_arc_sync.py`](scripts/jellyfin_arc_sync.py) polls a local Jellyfin server's `/Sessions` API and invokes `libArcToggle` (`PCM` for `<= 2ch`, `DD` for `>= 3ch`, defaulting back to `DD` when idle/unknown) on track or idle transitions without overriding manual DVR button presses mid-item.
 - Because the source format is global, non-Jellyfin stereo programmes are re-encoded into Dolby Digital unless toggled manually with the DVR key.
 - DTS 5.1 is advertised and selected the same way. Playback was not checked on a receiver that only decodes Dolby Digital.
 - This path does not carry multichannel LPCM, Dolby Digital Plus, TrueHD/Atmos, DTS-HD, or eARC.
@@ -215,26 +215,26 @@ These are the menu settings used with the configuration above:
 | Cell Light | 20 |
 | Contrast | 100 |
 | Brightness | 50 |
-| Color Space | Custom, with the BT.709 values below |
+| Color Space | **Auto** (factory Rec.709 LUT, WCE off; recommended without a meter) |
 | Gamma | 0 on the OSD slider (`OSD_GAMMA:0`), curve `GAMMA:2.4` |
 | Source range | Standard / limited RGB, HDMI black level **Low** |
 
 `2.4` is the curve BT.1886 becomes when the display's own black is treated as zero. Full-range RGB on the source crushes the codes just above black into that toe. Brightness has to sit on the black point: on a near-black PLUGE, in the source's own range, 50 is the value at which the bars above black are still just visible on this set.
 
-### BT.709
+### Color Space (`Auto` vs experimental `BT.709` Custom)
 
-Color Space → Custom, used with `GAMMA:2.4`:
+Firmware disassembly of `PrimePictureShare::m_PrimePicture_SetColorSpace` and `m_PrimePicture_Set_ColorMapping` shows that **Auto** (`0x2b0`–`0x2c1`) and **Custom** (`0x3a9`–`0x3b8`) both disable WCE (`0x280 = 0`) and share the exact same Bank `0x14` 3×3×3 LUT routine (`on = 10*(x-50) + 512`, `off = 5*x + 512`). Checking Samsung's factory `Auto` table (`G = [86, 54, 28]`, `C = [85, 48, 52]`) proves Bank `0x14`'s physical full scale is ~`1024–1536` rather than the `500` assumed by `scripts/gamut/model.py` (see [firmware-reference.md](docs/firmware-reference.md#factory-color-tables)). Without a colorimeter on your specific panel, **`Color Space → Auto`** (`libCMSApply AUTO`) is closer to Rec.709 than the heuristic `BT709` Custom preset below, which under-corrects Green by ~2–3×:
 
-| Colour | R | G | B | Estimated dE00 |
-|---|---:|---:|---:|---:|
-| Red | 46 | 0 | 17 | 0.56 |
-| Green | 34 | 57 | 16 | 0.29 |
-| Blue | 20 | 0 | 49 | 1.99 |
-| Yellow | 48 | 56 | 21 | 0.53 |
-| Cyan | 37 | 56 | 51 | 0.74 |
-| Magenta | 46 | 0 | 50 | 1.03 |
+| Colour | R | G | B |
+|---|---:|---:|---:|
+| Red | 46 | 0 | 17 |
+| Green | 34 | 57 | 16 |
+| Blue | 20 | 0 | 49 |
+| Yellow | 48 | 56 | 21 |
+| Cyan | 37 | 56 | 51 |
+| Magenta | 46 | 0 | 50 |
 
-These dE00 figures are calculated from a 2014 measurement of a different PN60F5500, not from a meter on this panel. Blue and magenta cannot reach a BT.709 primary inside that measured native gamut. `libCMSApply` applies this preset: `BT709` selects Custom, writes these six triples, and saves Movie. With no argument it returns the picture to Native. The model is in `scripts/gamut/`. The saved picture state is [calibration/PicSettings_HDMI3_2_BT709.bin](calibration/PicSettings_HDMI3_2_BT709.bin). The other picture files, and how they were restored, are in [validation](docs/validation.md) and [calibration](calibration/README.md).
+`libCMSApply` supports `AUTO` (recommended without a meter), `BT709` (writes the experimental Custom preset above), and `NATIVE` (reverts to Native). The historical picture backups are in [calibration/](calibration/README.md) and [validation](docs/validation.md).
 
 ### Apply a configuration
 

@@ -1,9 +1,9 @@
 /*
- * libCMSApply - apply the BT.709 Custom color-space preset (or revert to
- * Native) through TCScreenImpl, resetting the cube to identity first so
- * averaged nodes are deterministic.
+ * libCMSApply - select Color Space Auto (factory Rec.709 LUT, WCE off),
+ * apply the experimental BT.709 Custom preset, or revert to Native through
+ * TCScreenImpl.
  *
- * Usage: samyGOso -T -B -l libCMSApply.so BT709   (or no arg for Native)
+ * Usage: samyGOso -T -B -l libCMSApply.so AUTO|BT709|NATIVE
  */
 #include <dlfcn.h>
 #include <stdint.h>
@@ -31,9 +31,11 @@ void lib_init(void *handle, const char *libpath)
     (void)handle;
     const char *argv[8];
     int         argc = sgo_args(libpath, argv, 8);
-    int         bt709 = argc > 0 && strcasecmp(argv[0], "BT709") == 0;
+    int         want_auto = argc > 0 && strcasecmp(argv[0], "AUTO") == 0;
+    int         want_bt709 = argc > 0 && strcasecmp(argv[0], "BT709") == 0;
+    const char *label = want_auto ? "AUTO" : (want_bt709 ? "BT709" : "NATIVE");
 
-    say("=== CMSApply %s ===", bt709 ? "BT709" : "NATIVE");
+    say("=== CMSApply %s ===", label);
     void *exetv = dlopen(NULL, RTLD_LAZY);
     if (!exetv)
         return;
@@ -68,13 +70,15 @@ void lib_init(void *handle, const char *libpath)
     int rc = get_cs(screen, &mode, 0);
     say("before mode=%d rc=%d", mode, rc);
 
-    rc = set_cs(screen, 3, 0);
-    say("select custom rc=%d", rc);
-    for (int i = 0; i < 6; i++)
-        set_custom(screen, i, &identity[i]);
-    usleep(100000);
-
-    if (bt709) {
+    if (want_auto) {
+        rc = set_cs(screen, 0, 0);
+        say("select auto rc=%d", rc);
+    } else if (want_bt709) {
+        rc = set_cs(screen, 3, 0);
+        say("select custom rc=%d", rc);
+        for (int i = 0; i < 6; i++)
+            set_custom(screen, i, &identity[i]);
+        usleep(100000);
         for (int i = 0; i < 6; i++) {
             rc = set_custom(screen, i, &preset[i]);
             say("preset %d: %u,%u,%u rc=%d", i, preset[i].r, preset[i].g, preset[i].b, rc);
@@ -82,6 +86,10 @@ void lib_init(void *handle, const char *libpath)
         rc = set_cs(screen, 3, 0);
         say("reselect custom rc=%d", rc);
     } else {
+        rc = set_cs(screen, 3, 0);
+        for (int i = 0; i < 6; i++)
+            set_custom(screen, i, &identity[i]);
+        usleep(100000);
         rc = set_cs(screen, 1, 0);
         say("select native rc=%d", rc);
     }

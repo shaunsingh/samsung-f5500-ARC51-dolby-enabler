@@ -48,7 +48,9 @@ Values read through `DBFactoryBase::GetUniqueItemData`:
 | Cyan | 85, 48, 52 | 0, 48, 52 |
 | Magenta | 44, 39, 52 | 50, 0, 50 |
 
-Native B and C tables are identical. The transfer model reproduced all 81 Native words exactly before it was used to generate the BT.709 Custom preset.
+Native B and C tables are identical. Both `Auto` (`0x2b0`–`0x2c1`) and `Custom` (`0x3a9`–`0x3b8`) disable WCE (`0x280 = 0`) and branch into the identical Bank `0x14` 3D LUT path (`on = 10*(x-50) + 512`, `off = 5*x + 512`); only `Native` (`0x2c2`–`0x2e5`) enables WCE.
+
+**Hardware LUT scale audit:** `scripts/gamut/model.py` reproduces all 81 integer Bank `0x14` register writes, but assumed full scale `FS = 500` (`w_on = x/50`, `w_off = x/100`). Checking Samsung's own factory `Auto` table (`G = [86, 54, 28]`, `C = [85, 48, 52]`) disproves `FS = 500`—under `FS = 500`, `Auto` would map Green to yellow-brown `(0.40, 0.51)` and Cyan to gray `(0.28, 0.28)`. Fitting `Auto` against published PN60F5500 primaries puts Bank `0x14`'s physical full scale near `FS ≈ 1024–1536` (~2–3× finer per slider unit). Consequently, without a meter on this specific set, Samsung's factory **`Auto`** table is substantially closer to Rec.709 than the `FS = 500` heuristic `BT709` Custom preset (which under-corrects Green to nearly Native `(0.286, 0.617)`).
 
 ## Plasma registers
 

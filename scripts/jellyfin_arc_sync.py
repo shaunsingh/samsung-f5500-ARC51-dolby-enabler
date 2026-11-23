@@ -9,9 +9,11 @@ Solves the Xbox global-bitstream limitation cleanly without DSP tapping:
     so the soundbar receives true Stereo PCM 2.0 instead of re-encoded 5.1.
   - Multichannel tracks (Channels >= 3, e.g. 5.1/7.1)     -> libArcToggle DD
     so the soundbar receives true Dolby Digital 5.1 over HDMI-ARC.
+  - Unknown / idle / stopped (outside Jellyfin or missing channel metadata)
+    -> defaults back to Dolby Digital 5.1 (DD) after --idle-delay seconds.
 
 Manual DVR remote presses are never overridden mid-item: switching triggers
-only when a new media item or audio stream index begins playing.
+only when playback transitions to a new item/audio track or returns to idle.
 """
 import argparse
 import json
@@ -126,6 +128,15 @@ def active_audio_info(sessions, device_filter):
 
         if channels is not None:
             return (item_id, aidx), int(channels), title, dev
+        return (item_id, aidx), None, title, dev
+    return None
+
+
+def beam_mode_from_code(code):
+    if code == "33554434":
+        return "PCM"
+    if code == "84934713":
+        return "DD"
     return None
 
 
@@ -136,9 +147,10 @@ def main():
     ap.add_argument("--tv", required=True, help="Samsung TV IP address (SamyGO telnet port 23)")
     ap.add_argument("--tv-port", type=int, default=23)
     ap.add_argument("--device", default="xbox", help="Case-insensitive substring matching DeviceName/Client (empty = any)")
-    ap.add_argument("--beam", default="", help="Optional Sonos Beam IP to log verified HTAudioInCode")
+    ap.add_argument("--beam", default="", help="Optional Sonos Beam IP to check/log live HTAudioInCode")
     ap.add_argument("--key", default="KEY:DVR", help="Keep this libArcToggle key armed on injection")
     ap.add_argument("--interval", type=float, default=2.0, help="Poll interval in seconds")
+    ap.add_argument("--idle-delay", type=float, default=10.0, help="Seconds idle/unknown before defaulting back to DD")
     ap.add_argument("--dry-run", action="store_true", help="Print decisions without calling the TV")
     ap.add_argument("--once", action="store_true", help="Check once and exit")
     args = ap.parse_args()
@@ -151,37 +163,67 @@ def main():
 
     last_key = None
     last_mode = None
+    idle_since = None
     tv_down_logged = False
 
-    print(f"[arc-sync] watching {args.jellyfin} (device~='{args.device}') -> TV {args.tv}", flush=True)
+    def apply_mode(want, reason):
+        nonlocal last_mode, tv_down_logged
+        live_code = beam_audio_code(args.beam) if args.beam else None
+        live_mode = beam_mode_from_code(live_code)
+        if live_mode == want:
+            print(f"[arc-sync] {reason} -> already {want} (beam={live_code})", flush=True)
+            last_mode = want
+            return True
+        if live_mode is None and want == last_mode:
+            print(f"[arc-sync] {reason} -> already {want}", flush=True)
+            return True
+
+        print(f"[arc-sync] {reason} -> {want}", flush=True)
+        if args.dry_run:
+            last_mode = want
+            return True
+        try:
+            out = tv_set_arc(args.tv, args.tv_port, want, key_opt=args.key)
+            last_mode = want
+            tv_down_logged = False
+            code = beam_audio_code(args.beam)
+            extra = f" beam={code}" if code else ""
+            print(f"[arc-sync] TV: {' | '.join(out.splitlines())}{extra}", flush=True)
+            return True
+        except OSError as e:
+            if not tv_down_logged:
+                print(f"[arc-sync] TV unreachable ({e}); will retry on state change", flush=True)
+                tv_down_logged = True
+            return False
+
+    print(
+        f"[arc-sync] watching {args.jellyfin} (device~='{args.device}') -> TV {args.tv} "
+        f"(idle/unknown -> DD after {args.idle_delay:.0f}s)",
+        flush=True,
+    )
     while not STOP:
         try:
             sessions = jellyfin_sessions(args.jellyfin, args.api_key)
             info = active_audio_info(sessions, args.device)
             if info:
+                idle_since = None
                 track_key, channels, title, dev = info
-                want = "PCM" if channels <= 2 else "DD"
+                if channels is None:
+                    want = "DD"
+                    desc = f"{dev}: '{title}' (unknown ch -> default DD)"
+                else:
+                    want = "PCM" if channels <= 2 else "DD"
+                    desc = f"{dev}: '{title}' ({channels}ch)"
                 if track_key != last_key:
-                    last_key = track_key
-                    if want != last_mode:
-                        print(f"[arc-sync] {dev}: '{title}' ({channels}ch) -> {want}", flush=True)
-                        if not args.dry_run:
-                            try:
-                                out = tv_set_arc(args.tv, args.tv_port, want, key_opt=args.key)
-                                last_mode = want
-                                tv_down_logged = False
-                                code = beam_audio_code(args.beam)
-                                extra = f" beam={code}" if code else ""
-                                print(f"[arc-sync] TV: {' | '.join(out.splitlines())}{extra}", flush=True)
-                            except OSError as e:
-                                if not tv_down_logged:
-                                    print(f"[arc-sync] TV unreachable ({e}); will retry on next item", flush=True)
-                                    tv_down_logged = True
-                                last_key = None  # retry once TV wakes up
-                        else:
-                            last_mode = want
-                    else:
-                        print(f"[arc-sync] {dev}: '{title}' ({channels}ch) already {want}", flush=True)
+                    if apply_mode(want, desc):
+                        last_key = track_key
+            else:
+                now = time.monotonic()
+                if idle_since is None:
+                    idle_since = now
+                if last_key != "__IDLE__" and (args.once or (now - idle_since) >= args.idle_delay):
+                    if apply_mode("DD", "idle/unknown source"):
+                        last_key = "__IDLE__"
         except urllib.error.HTTPError as e:
             print(f"[arc-sync] Jellyfin HTTP {e.code}: check API key", file=sys.stderr, flush=True)
         except Exception as e:

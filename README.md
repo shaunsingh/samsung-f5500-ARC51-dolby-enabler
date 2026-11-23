@@ -215,26 +215,28 @@ These are the menu settings used with the configuration above:
 | Cell Light | 20 |
 | Contrast | 100 |
 | Brightness | 50 |
-| Color Space | **Auto** (factory Rec.709 LUT, WCE off; recommended without a meter) |
+| Color Space | **Custom (`WIDE`)** — hue-aligned near-native gamut, WCE off (or **Auto** for strict Rec.709) |
 | Gamma | 0 on the OSD slider (`OSD_GAMMA:0`), curve `GAMMA:2.4` |
 | Source range | Standard / limited RGB, HDMI black level **Low** |
 
 `2.4` is the curve BT.1886 becomes when the display's own black is treated as zero. Full-range RGB on the source crushes the codes just above black into that toe. Brightness has to sit on the black point: on a near-black PLUGE, in the source's own range, 50 is the value at which the bars above black are still just visible on this set.
 
-### Color Space (`Auto` vs experimental `BT.709` Custom)
+### Color Space (`WIDE` Custom vs `Auto` vs `Native`)
 
-Firmware disassembly of `PrimePictureShare::m_PrimePicture_SetColorSpace` and `m_PrimePicture_Set_ColorMapping` shows that **Auto** (`0x2b0`–`0x2c1`) and **Custom** (`0x3a9`–`0x3b8`) both disable WCE (`0x280 = 0`) and share the exact same Bank `0x14` 3×3×3 LUT routine (`on = 10*(x-50) + 512`, `off = 5*x + 512`). Checking Samsung's factory `Auto` table (`G = [86, 54, 28]`, `C = [85, 48, 52]`) proves Bank `0x14`'s physical full scale is ~`1024–1536` rather than the `500` assumed by `scripts/gamut/model.py` (see [firmware-reference.md](docs/firmware-reference.md#factory-color-tables)). Without a colorimeter on your specific panel, **`Color Space → Auto`** (`libCMSApply AUTO`) is closer to Rec.709 than the heuristic `BT709` Custom preset below, which under-corrects Green by ~2–3×:
+Firmware disassembly of `PrimePictureShare::m_PrimePicture_SetColorSpace` and `m_PrimePicture_Set_ColorMapping` shows that **Auto** (`0x2b0`–`0x2c1`) and **Custom** (`0x3a9`–`0x3b8`) both disable WCE (`0x280 = 0`) and share the exact same Bank `0x14` 3×3×3 LUT routine (`on = 10*(x-50) + 512`, `off = 5*x + 512`), whereas **Native** (`0x2c2`–`0x2e5`) enables WCE. Checking Samsung's factory `Auto` table (`G = [86, 54, 28]`, `C = [85, 48, 52]`) proves Bank `0x14`'s physical full scale is ~`1024–1536` rather than the `500` assumed by `scripts/gamut/model.py` (see [firmware-reference.md](docs/firmware-reference.md#factory-color-tables)).
+
+For maximum clean gamut punch without WCE distortion or `Auto`'s 3-channel desaturation, the **`WIDE`** Custom preset (`libCMSApply WIDE`) keeps near-native phosphor saturation (~103.6% of Rec.709, zero third-channel bleed on R/G/B/Y/M) while correcting Native's Yellow/Cyan/Magenta/Green hue shifts (`avg |Δhue| ~1.4°` vs `4.0–5.7°` in Native across `FS = 1024–1536`):
 
 | Colour | R | G | B |
 |---|---:|---:|---:|
-| Red | 46 | 0 | 17 |
-| Green | 34 | 57 | 16 |
-| Blue | 20 | 0 | 49 |
-| Yellow | 48 | 56 | 21 |
-| Cyan | 37 | 56 | 51 |
-| Magenta | 46 | 0 | 50 |
+| Red | 47 | 0 | 20 |
+| Green | 55 | 55 | 0 |
+| Blue | 12 | 0 | 50 |
+| Yellow | 47 | 55 | 0 |
+| Cyan | 25 | 52 | 52 |
+| Magenta | 44 | 0 | 52 |
 
-`libCMSApply` supports `AUTO` (recommended without a meter), `BT709` (writes the experimental Custom preset above), and `NATIVE` (reverts to Native). The historical picture backups are in [calibration/](calibration/README.md) and [validation](docs/validation.md).
+`libCMSApply` supports `WIDE` (hue-aligned near-native Custom, WCE off), `AUTO` (factory Rec.709 LUT, WCE off), `BT709` (legacy `FS=500` Custom preset), and `NATIVE` (reverts to Native with WCE). The historical picture backups are in [calibration/](calibration/README.md) and [validation](docs/validation.md).
 
 ### Apply a configuration
 

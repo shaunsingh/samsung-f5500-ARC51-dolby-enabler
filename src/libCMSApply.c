@@ -1,9 +1,10 @@
 /*
  * libCMSApply - select Color Space Auto (factory Rec.709 LUT, WCE off),
- * apply the experimental BT.709 Custom preset, or revert to Native through
- * TCScreenImpl.
+ * apply the hue-aligned WIDE Custom preset (WCE off, near-native saturation,
+ * zero 3rd-channel desaturation), apply the legacy BT709 preset, or revert
+ * to Native through TCScreenImpl.
  *
- * Usage: samyGOso -T -B -l libCMSApply.so AUTO|BT709|NATIVE
+ * Usage: samyGOso -T -B -l libCMSApply.so WIDE|AUTO|BT709|NATIVE
  */
 #include <dlfcn.h>
 #include <stdint.h>
@@ -32,8 +33,9 @@ void lib_init(void *handle, const char *libpath)
     const char *argv[8];
     int         argc = sgo_args(libpath, argv, 8);
     int         want_auto = argc > 0 && strcasecmp(argv[0], "AUTO") == 0;
+    int         want_wide = argc > 0 && strcasecmp(argv[0], "WIDE") == 0;
     int         want_bt709 = argc > 0 && strcasecmp(argv[0], "BT709") == 0;
-    const char *label = want_auto ? "AUTO" : (want_bt709 ? "BT709" : "NATIVE");
+    const char *label = want_wide ? "WIDE" : (want_auto ? "AUTO" : (want_bt709 ? "BT709" : "NATIVE"));
 
     say("=== CMSApply %s ===", label);
     void *exetv = dlopen(NULL, RTLD_LAZY);
@@ -62,7 +64,12 @@ void lib_init(void *handle, const char *libpath)
     static const rgb_t identity[6] = {
         { 50, 0, 0 }, { 0, 50, 0 }, { 0, 0, 50 }, { 50, 50, 0 }, { 0, 50, 50 }, { 50, 0, 50 },
     };
-    static const rgb_t preset[6] = {
+    /* Hue-aligned wide/near-native preset (WCE off, zero milky 3rd-channel bleed) */
+    static const rgb_t wide_preset[6] = {
+        { 47, 0, 20 }, { 55, 55, 0 }, { 12, 0, 50 }, { 47, 55, 0 }, { 25, 52, 52 }, { 44, 0, 52 },
+    };
+    /* Legacy FS=500 heuristic preset */
+    static const rgb_t bt709_preset[6] = {
         { 46, 0, 17 }, { 34, 57, 16 }, { 20, 0, 49 }, { 48, 56, 21 }, { 37, 56, 51 }, { 46, 0, 50 },
     };
 
@@ -73,15 +80,16 @@ void lib_init(void *handle, const char *libpath)
     if (want_auto) {
         rc = set_cs(screen, 0, 0);
         say("select auto rc=%d", rc);
-    } else if (want_bt709) {
+    } else if (want_wide || want_bt709) {
+        const rgb_t *tbl = want_wide ? wide_preset : bt709_preset;
         rc = set_cs(screen, 3, 0);
         say("select custom rc=%d", rc);
         for (int i = 0; i < 6; i++)
             set_custom(screen, i, &identity[i]);
         usleep(100000);
         for (int i = 0; i < 6; i++) {
-            rc = set_custom(screen, i, &preset[i]);
-            say("preset %d: %u,%u,%u rc=%d", i, preset[i].r, preset[i].g, preset[i].b, rc);
+            rc = set_custom(screen, i, &tbl[i]);
+            say("preset %d: %u,%u,%u rc=%d", i, tbl[i].r, tbl[i].g, tbl[i].b, rc);
         }
         rc = set_cs(screen, 3, 0);
         say("reselect custom rc=%d", rc);

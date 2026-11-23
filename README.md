@@ -2,10 +2,19 @@
 
 [SamyGO](https://forum.samygo.tv/) payloads for a 2013 Samsung F-series plasma, developed on a **PN60F5500AF** running firmware **T-MST12AKUC-2225.0**. Payloads are injected into the running `exeTV` (`libDDCRAM_EDID`, `libPDPTune`) or `exeAPP` (`libArcToggle`) process from a SamyGO USB stick. Nothing is written to the TV's flash: without the stick, the TV is stock.
 
+## Headline results (PN60F5500AF)
+
+| Area | Result | Basis |
+|---|---|---|
+| **Full-field luminance** | **~+80% over stock Movie** (`+14.5%` Standard drive, `+12.8%` 60 Hz DeepBlackMode, **`+42.8% ± 1.0%`** at `DUTY2:168` vs `128`) | Bracketed `A → B → A` optical sweep (`NULL` controls `99.6–100.8%`), panel steady at 44 °C, reactive thermal APC guard intact, `SAPC:OFF` (no static scene dimming) |
+| **Tone curve (EOTF)** | **Exact 12-bit hardware gamma LUT** (`GAMMA:2.4` / `BT1886` / `2.3` / `TOE`) | Composed onto `exeTV`'s `MDrv_PNL_SetGammaTbl` while preserving Warm2 & 2p/10p WB; video black anchored at drive `0` |
+| **Color gamut (`WIDE` Custom)** | **101.2%–102.0%** near-native chroma, WCE off; **`0.90°–1.43°`** `u'v'` hue (vs `4.1°–5.9°` Native), **`0.30–0.61`** `\|ΔL*\|` (vs `2.6–3.3`), **`2.13–2.46`** `mean ΔE2000` (vs `4.15–5.06`) | Bank `0x14` LUT scale calibrated from Samsung's factory `Auto` table (`FS ≈ 1536–1664`), minimax solved across `FS = 1024–1536` (`scripts/gamut/solve_cms.py`; model estimate, no meter on this unit) |
+| **HDMI-ARC 5.1 & switching** | **Dolby Digital 5.1 (640 kbps) & DTS 5.1** over ARC; **~480–505 ms** one-button **DVR** PCM ↔ DD toggle (zero universal-remote popup) | DDC RAM EDID patch + `exeAPP` vtable hook; optional Keep-Alive Jellyfin watcher (`jellyfin_arc_sync.py`) switches `<= 2ch` → PCM and `>= 3ch` / idle → DD |
+
 | Component | What it does | Works on |
 |---|---|---|
 | **`libDDCRAM_EDID`** | Makes HDMI sources offer **Dolby Digital 5.1** and **DTS 5.1**, which the TV passes to an HDMI-ARC or optical receiver. No EDID emulator or audio extractor is required. | F-series `T-MST12` firmware that exports the MStar functions in [the firmware notes](docs/firmware-reference.md) |
-| **`libPDPTune`** | Unlocks **10-point White Balance**, **Color Space → Custom**, and **Expert Pattern**, and can override plasma drive, Deep Black, Peak Stretch, duty, Sub Contrast, and the 12-bit gamma curve (`BT1886`, `2.4`, `2.3`, `TOE`). | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`. Any other firmware is left alone. |
+| **`libPDPTune`** | Unlocks **10-point White Balance**, **Color Space → Custom**, and **Expert Pattern**, and can override plasma drive, Deep Black, DeepBlackMode, PowerSave, APC/SAPC, duty, Sub Contrast, Cinema Smooth, test patterns, and the 12-bit gamma curve (`BT1886`, `2.4`, `2.3`, `TOE`). | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`. Any other firmware is left alone. |
 | **`libArcToggle`** | One remote key swaps **PCM** and **Dolby Digital** on the SPDIF/ARC output, the same setting as Sound → Audio Format. | Only the PN60F5500 with exactly `T-MST12AKUC-2225.0`. Any other firmware is left alone. |
 
 ## Repository layout
@@ -15,14 +24,15 @@ src/            libDDCRAM_EDID.c, libPDPTune.c, libArcToggle.c, libCMSApply.c,
                 libCMProbe.c, libCMFactory.c, libHPD.c, libAudioProbe.c,
                 gamma_tables.h, samygo.h
 init/           boot scripts for the EDID patch, libPDPTune, and libArcToggle
-scripts/        patch_edid_51.py, gamma_curves.py, optical_sweep.py, jellyfin_arc_sync.py, gamut/
+scripts/        patch_edid_51.py, gamma_curves.py, optical_sweep.py,
+                jellyfin_arc_sync.py, gamut/solve_cms.py
 test/           fake_exetv.c and fake_exeapp.c, QEMU stand-ins for all three boot payloads
 prebuilt/       the built libraries
 calibration/    picture-state files and this set's EDIDs
 docs/           firmware-reference.md, validation.md
 ```
 
-`libCMSApply` writes the BT.709 Custom preset. `libCMProbe` and `libCMFactory` only read the color tables. `libHPD` pulses hot-plug on HDMI3. `libAudioProbe` reads the external-output audio mode. The boot scripts do not load those four.
+`libCMSApply` switches Color Space (`WIDE`, `AUTO`, `BT709`, or `NATIVE`). `libCMFactory` dumps the factory color tables and live Bank `0x14` LUT; `libCMProbe` reads or transiently tests Bank `0x14` with automatic restore. `libHPD` pulses hot-plug on HDMI3. `libAudioProbe` reads the external-output audio mode. The boot scripts do not load those five utility payloads.
 
 ## Reference
 
@@ -151,7 +161,7 @@ samyGOso -n exeAPP -B -r -l /mnt/opt/privateer/usr/libso/libArcToggle.so TOGGLE
 cat /dtv/ArcToggle.log
 ```
 
-The log is `/dtv/ArcToggle.log`. A line like `PCM -> Dolby set=1 now=Dolby 12ms` confirms the Binder call succeeded.
+The log is `/dtv/ArcToggle.log`. A line like `PCM -> Dolby set=1 now=Dolby 490ms` confirms the Binder call succeeded.
 
 ## Plasma picture tuning
 
@@ -197,13 +207,14 @@ The firmware writes Deep Black and Peak Stretch as a pair from Black Optimizer: 
 
 `DUTY2` is the second duty word the logic board is given while the panel is lit (register `0x89da`). Samsung sends a constant. It is not a percentage of brightness, and it is not the Cell Light control.
 
-| Value | What that maximum means |
+| Value | What it means |
 |---|---|
 | **128** | The highest duty value this firmware sends to any panel type. That is Samsung's ceiling. |
-| **139** | Baseline boosted value on this TV, 11 counts above Samsung's ceiling. |
-| **255** | The full 8-bit hardware register ceiling (`uxtb` in `t_Logic_SetDutyData`). Not a Samsung rating; step up incrementally while checking panel temperature and image stability. |
+| **139** | Early conservative baseline on this TV (`+3.9%` relative luminance over `128`). |
+| **168** | Measured full-field peak on this panel (`+42.8% ± 1.0%` over `128`, before power-limit fold-back above `~175`). |
+| **255** | The full 8-bit hardware register ceiling (`uxtb` in `t_Logic_SetDutyData`). Not a Samsung rating; folds back to `~118%` on full-field white. |
 
-A value above `128` is written only while active `APC_OFFSET` (`0x89c0`) is `0`, which is Cell Light 20 with Eco and thermal dimming off — or continuously if `APC_OFFSET:0` is explicitly passed. More light means more power, heat, and wear. Nothing here claims a measured increase in brightness or a known lifetime cost.
+A value above `128` is written only while active `APC_OFFSET` (`0x89c0`) is `0`, which is Cell Light 20 with Eco and thermal dimming off — or continuously if `APC_OFFSET:0` is explicitly passed. In `libPDPTune` 2.5.2, any firmware transition of `0x89c0` (`0 ↔ >0`) immediately drops or restores `duty_2` without waiting for a separate `0x89da` write. Relative luminance ratios above were measured optically (`scripts/optical_sweep.py`); absolute cd/m² and long-term panel wear are unmeasured.
 
 ### Picture menu
 
@@ -225,7 +236,7 @@ These are the menu settings used with the configuration above:
 
 Firmware disassembly of `PrimePictureShare::m_PrimePicture_SetColorSpace` and `m_PrimePicture_Set_ColorMapping` shows that **Auto** (`0x2b0`–`0x2c1`) and **Custom** (`0x3a9`–`0x3b8`) both disable WCE (`0x280 = 0`) and share the exact same Bank `0x14` 3×3×3 LUT routine (`on = 10*(x-50) + 512`, `off = 5*x + 512`), whereas **Native** (`0x2c2`–`0x2e5`) enables WCE. Calibrating Samsung's factory `Auto` table (`G = [86, 54, 28]`, `C = [85, 48, 52]`) against ITU-R BT.709-6 in perceptual CIE 1976 `u'v'` / CIEDE2000 puts Bank `0x14`'s physical full scale at `FS ≈ 1536–1664` (`mean du'v' = 0.0089`, vs `0.0464` / `ΔE2000 = 14.4` at the legacy `FS = 500` assumption; see [scripts/gamut/solve_cms.py](scripts/gamut/solve_cms.py) and [firmware-reference.md](docs/firmware-reference.md#factory-color-tables)).
 
-To use the panel's clean near-native phosphor gamut without WCE distortion or `Auto`'s 3-channel desaturation, the **`WIDE`** Custom preset (`libCMSApply WIDE`) is solved by minimax optimization of CIE 1976 `u'v'` hue angle and CIELAB lightness (`|ΔL*|`) across `FS ∈ {1024, 1280, 1536}` at `GAMMA:2.4` with zero third-channel bleed on R/G/B/Y/M—outperforming `Native`, `Auto`, and the legacy `BT709` table on every perceptual metric simultaneously (`mean ΔE2000 = 2.14–2.48`, `mean u'v' hue = 0.89°–1.43°`, `mean |ΔL*| = 0.29–0.67`, `avgSat = 101.3%–102.0%`):
+To use the panel's clean near-native phosphor gamut without WCE distortion or `Auto`'s 3-channel desaturation, the **`WIDE`** Custom preset (`libCMSApply WIDE`) is solved by minimax optimization of CIE 1976 `u'v'` hue angle and CIELAB lightness (`|ΔL*|`) across `FS ∈ {1024, 1280, 1536}` at `GAMMA:2.4` with zero third-channel bleed on R/G/B/Y/M—outperforming `Native`, `Auto`, and the legacy `BT709` table on every perceptual metric simultaneously (`mean ΔE2000 = 2.13–2.46`, `mean u'v' hue = 0.90°–1.43°`, `mean |ΔL*| = 0.30–0.61`, `avgSat = 101.2%–102.0%`):
 
 | Colour | R | G | B |
 |---|---:|---:|---:|
@@ -265,7 +276,7 @@ make lint
 make prebuilt
 ```
 
-`make test` runs `libPDPTune` and `libDDCRAM_EDID` against `test/fake_exetv.c` and `libArcToggle` against `test/fake_exeapp.c` under QEMU. It checks arguments, hooks, overrides, gamma tables, vtable interception, and EDID rules. It does not check ARC playback or the picture on a panel.
+`make` checks every payload against the TV's glibc 2.14.1 import whitelist and verifies that `lib_init` and `lib_deinit` are exported. `make test` runs `scripts/gamma_curves.py --check`, `scripts/gamut/solve_cms.py --check`, `libPDPTune` and `libDDCRAM_EDID` against `test/fake_exetv.c`, and `libArcToggle` against `test/fake_exeapp.c` under QEMU. It does not check ARC playback or the picture on a panel.
 
 ## Disable or revert
 

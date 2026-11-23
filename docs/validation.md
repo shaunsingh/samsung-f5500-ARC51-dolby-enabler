@@ -21,7 +21,7 @@ The Beam's status endpoint is `http://BEAM_IP:1400/status/zp`. Samsung's OSD may
 - Beam `HTAudioInCode` tracked every toggle live between `84934713` (Dolby Digital 5.1) and `33554434` (Stereo PCM 2.0).
 - Zero universal-remote setup prompts appeared, and zero idle events were logged.
 
-## Plasma register tuning (`libPDPTune` 2.5.1)
+## Plasma register tuning (`libPDPTune` 2.5.2)
 
 Stock Movie-mode 60 Hz readback on HDMI3 at 38 °C showed `0x806f = 0x0105`, `0x80bf = 0x0000` (DeepBlackMode off on 60 Hz), `0x89ee = 0x0001` (Static APC timer active), `0x89c0 = 0x0000` (APC offset 0), `0x89da = 0x0080` (`128`), `0x8927 = 0x0800` (`128`), `CinemaSmooth = 0`, and `OutputVFreq = 60.00 Hz`.
 
@@ -63,16 +63,15 @@ Final persisted configuration (`UNLOCK DRIVE:STANDARD DEEPBLACK:ON PEAKSTRETCH:O
 
 Movie, Cell Light 20, Contrast 100, Brightness 50, Color Space Custom, OSD Gamma 0, `GAMMA:2.4`. The source stays in limited RGB with the TV's HDMI black level on Low. Full-range RGB crushed the codes just above black.
 
-## BT.709 Custom preset
+## Color Space (`WIDE` Custom vs legacy `BT.709`)
 
-- The firmware model reproduced all 81 stock Native color-cube words exactly.
-- The computed Custom preset matched all 81 expected words after application.
-- `libBackPicSet` reported Custom selector `3` and the six expected RGB triples.
-- A Native → load-BT.709-file restore test restored Custom mode and the exact register set.
-- A full TV reboot preserved Custom mode, all six triples, and all 81 register values.
-- The pre-BT.709 and final active-state files differ in only 17 bytes: the selector and changed RGB bytes. All unrelated picture fields remained unchanged.
+- `libCMSApply WIDE` (`R:41,0,0  G:73,54,0  B:0,0,49  Y:46,54,0  C:49,54,53  M:41,0,52`, solved by `scripts/gamut/solve_cms.py` across `FS = 1024–1536`) was applied live on HDMI3 Movie, read back cleanly (`mode=3`, all six triples verified), and saved (`save movie rc=0`).
+- Earlier persistence checks on the legacy `BT709` Custom preset confirmed:
+  - The firmware register model reproduced all 81 stock Native color-cube words (`Bank 0x14`) exactly.
+  - `libBackPicSet` reported Custom selector `3` and preserved Custom mode, all six triples, and all 81 register values across a full TV reboot.
+  - The pre-BT.709 and BT.709 backup files differ in only 17 bytes (selector + RGB bytes).
 
-These checks verify settings persistence and the register-transfer model. They do not replace optical calibration.
+These checks verify settings persistence and the register-transfer model. They do not replace an optical colorimeter on this specific panel.
 
 The files on the development set are under `/dtv/usb/sda1/picsettings_final/`:
 
@@ -93,8 +92,8 @@ samyGOso -T -B -l /mnt/opt/privateer/usr/libso/libBackPicSet.so \
 
 On-TV DSP detection cannot inspect the six channels inside a DD 5.1 bitstream (Samsung exposes only stereo PCM capture and L/R level reporting, and Beam Gen 1 has no input-codec override).
 
-For Jellyfin playback from a local server, `scripts/jellyfin_arc_sync.py` solves this cleanly out-of-band by querying Jellyfin's `/Sessions` API for the active audio stream's true `Channels` count and driving `libArcToggle` (`PCM` for `<= 2ch`, `DD` for `>= 3ch`) on item or audio-track changes without fighting manual DVR key presses.
+For Jellyfin playback from a local server, `scripts/jellyfin_arc_sync.py` runs under systemd using a persistent HTTP/1.1 Keep-Alive connection (`Authorization: MediaBrowser Token="..."` for Jellyfin 12.4+), checks live Beam `HTAudioInCode` before calling TV telnet, switches `<= 2ch` → `PCM` and `>= 3ch` → `DD`, holds the active mode while paused, and defaults back to `DD` 10 s after playback stops without fighting manual DVR key presses. Verified live against Jellyfin 12.4.0 (`XBOXONE Gelatinarm` playing 6ch `TRON: Legacy`, Beam confirmed `84934713`).
 
 ## Optical limits
 
-No meter was available for the development panel. BT.709 dE00 figures are model estimates based on another PN60F5500 measurement, not measurements of this unit. Blue and magenta cannot reach ideal BT.709 within the measured native gamut. Plasma drive and duty changes remain experimental.
+No colorimeter or absolute photometer (cd/m²) was available for the development panel. Relative luminance gains (`~+80%` over stock Movie, `+42.8% ± 1.0%` at `DUTY2:168`) were measured via bracketed `A → B → A` differential video photometry (`scripts/optical_sweep.py`). `WIDE` color metrics are perceptual model estimates from Samsung's factory `Auto` table and reference PN60F5500 primaries (`scripts/gamut/solve_cms.py`), not direct colorimeter measurements of this unit. Plasma drive and duty changes remain experimental.

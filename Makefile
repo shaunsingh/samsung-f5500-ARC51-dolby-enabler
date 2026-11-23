@@ -1,8 +1,8 @@
-# samyGOso payloads for exeTV: ARMv7, soft-float EABI, glibc 2.14.1.
+# samyGOso payloads for exeTV and exeAPP: ARMv7, soft-float EABI, glibc 2.14.1.
 #
 #   make            build/*.so
-#   make test       check src/gamma_tables.h, then run the libraries against
-#                   test/fake_exetv.c under qemu-arm
+#   make test       check src/gamma_tables.h, then run the payloads against
+#                   test/fake_exetv.c and test/fake_exeapp.c under qemu-arm
 #   make lint       shellcheck the boot scripts
 #   make prebuilt   copy build/*.so to prebuilt/
 

@@ -1,6 +1,6 @@
 # Samsung F5500 ARC 5.1 and plasma tuning
 
-[SamyGO](https://forum.samygo.tv/) payloads for a 2013 Samsung F-series plasma, developed on a **PN60F5500AF** running firmware **T-MST12AKUC-2225.0**. These payloads are injected into the running `exeTV` process from a SamyGO USB stick. Nothing is written to the TV's flash: without the stick, the TV is stock.
+[SamyGO](https://forum.samygo.tv/) payloads for a 2013 Samsung F-series plasma, developed on a **PN60F5500AF** running firmware **T-MST12AKUC-2225.0**. Payloads are injected into the running `exeTV` (`libDDCRAM_EDID`, `libPDPTune`) or `exeAPP` (`libArcToggle`) process from a SamyGO USB stick. Nothing is written to the TV's flash: without the stick, the TV is stock.
 
 | Component | What it does | Works on |
 |---|---|---|
@@ -15,7 +15,7 @@ src/            libDDCRAM_EDID.c, libPDPTune.c, libArcToggle.c, libCMSApply.c,
                 libCMProbe.c, libCMFactory.c, libHPD.c, libAudioProbe.c,
                 gamma_tables.h, samygo.h
 init/           boot scripts for the EDID patch, libPDPTune, and libArcToggle
-scripts/        patch_edid_51.py, gamma_curves.py, gamut/, re/
+scripts/        patch_edid_51.py, gamma_curves.py, gamut/
 test/           fake_exetv.c and fake_exeapp.c, QEMU stand-ins for all three boot payloads
 prebuilt/       the built libraries
 calibration/    picture-state files and this set's EDIDs

@@ -56,6 +56,11 @@ build/%.so: src/%.c src/samygo.h | build
 	if [ -n "$$unknown" ]; then \
 		echo "$@ imports symbols the TV may lack:" $$unknown >&2; rm -f $@; exit 1; \
 	fi
+	@for sym in lib_init lib_deinit; do \
+		if ! $(NM) -D --defined-only $@ | awk '{ print $$3 }' | grep -qx "$$sym"; then \
+			echo "$@ does not export $$sym (missing samygo.h / SGO_EXPORT?)" >&2; rm -f $@; exit 1; \
+		fi; \
+	done
 	$(STRIP) $@
 
 build/fake_exetv: test/fake_exetv.c | build

@@ -23,7 +23,10 @@ case $1 in
 	done
 	if [ -f "$LIB" ] && pidof exeTV > /dev/null; then
 		cr=$(printf '\r')
-		[ -f "$CONF" ] && OPTIONS=$(sed "s/#.*//; s/$cr//" "$CONF")
+		if [ -f "$CONF" ]; then
+			conf_opts=$(sed "s/#.*//; s/$cr//" "$CONF")
+			[ -n "$(printf '%s' "$conf_opts" | tr -d '[:space:]')" ] && OPTIONS="$conf_opts"
+		fi
 		rm -f "$LOG"
 		# One argument per word.
 		# shellcheck disable=SC2086

@@ -47,7 +47,7 @@
 #include "gamma_tables.h"
 #include "samygo.h"
 
-#define VERSION  "2.5.1"
+#define VERSION  "2.5.2"
 #define LOG      "/dtv/PDPTune.log"
 #define say(...) sgo_log(LOG, __VA_ARGS__)
 
@@ -421,8 +421,16 @@ static int on_write_i2c(void *logic, uint16_t reg, uint16_t value)
     int      result = write_i2c(logic, reg, want);
     if (result == 0) {
         knob->sent = want;
-        if (knob == &g_knobs[K_APC_OFFSET])
+        if (knob == &g_knobs[K_APC_OFFSET]) {
             g_apc_offset = want;
+            /* Re-evaluate DUTY2 boost immediately when APC_OFFSET transitions 0 <-> >0. */
+            struct knob *d2 = &g_knobs[K_DUTY2];
+            if (d2->to > DUTY2_FIXED && d2->stock != UNKNOWN) {
+                uint16_t d2_want = tuned(d2, (uint16_t)d2->stock);
+                if (d2_want != d2->sent && write_i2c(logic, d2->reg, d2_want) == 0)
+                    d2->sent = d2_want;
+            }
+        }
     }
     pthread_mutex_unlock(&g_lock);
     return result;
@@ -1017,8 +1025,11 @@ void lib_init(void *handle, const char *libpath)
             say("libPDPTune " VERSION ": bad argument '%s', nothing done", argv[i]);
             return;
         }
-        if (length < sizeof words)
-            length += (size_t)snprintf(words + length, sizeof words - length, " %s", argv[i]);
+        if (length < sizeof words - 1) {
+            int n = snprintf(words + length, sizeof words - length, " %s", argv[i]);
+            if (n > 0)
+                length += (size_t)n < sizeof words - length ? (size_t)n : sizeof words - 1 - length;
+        }
     }
     if (!request.configure && !request.dump) {
         say("libPDPTune " VERSION ": no arguments, nothing done");

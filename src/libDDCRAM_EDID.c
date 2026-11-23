@@ -116,9 +116,13 @@ void lib_init(void *handle, const char *libpath)
 
     const char *argv[8];
     int         argc = sgo_args(libpath, argv, 8);
-    bool        dump = false, load = false, pulse = false;
+    if (argc > 8) {
+        say("too many arguments, nothing done");
+        return;
+    }
+    bool dump = false, load = false, pulse = false;
 
-    for (int i = 0; i < argc && i < 8; i++) {
+    for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "DUMP") == 0)
             dump = true;
         else if (strcmp(argv[i], "LOAD") == 0)

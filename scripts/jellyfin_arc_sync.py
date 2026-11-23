@@ -9,6 +9,7 @@ Solves the Xbox global-bitstream limitation cleanly without DSP tapping:
     so the soundbar receives true Stereo PCM 2.0 instead of re-encoded 5.1.
   - Multichannel tracks (Channels >= 3, e.g. 5.1/7.1)     -> libArcToggle DD
     so the soundbar receives true Dolby Digital 5.1 over HDMI-ARC.
+  - Paused playback holds the active ARC mode (no audio dropout on unpause).
   - Unknown / idle / stopped (outside Jellyfin or missing channel metadata)
     -> defaults back to Dolby Digital 5.1 (DD) after --idle-delay seconds.
 
@@ -16,22 +17,23 @@ Manual DVR remote presses are never overridden mid-item: switching triggers
 only when playback transitions to a new item/audio track or returns to idle.
 """
 import argparse
+import http.client
 import json
 import os
 import re
 import signal
 import socket
 import sys
+import threading
 import time
-import urllib.error
+import urllib.parse
 import urllib.request
 
-STOP = False
+STOP_EVENT = threading.Event()
 
 
 def handle_sig(signum, frame):
-    global STOP
-    STOP = True
+    STOP_EVENT.set()
 
 
 def tv_set_arc(tv_host, tv_port, mode, key_opt="KEY:DVR", timeout=10.0):
@@ -50,7 +52,7 @@ def tv_set_arc(tv_host, tv_port, mode, key_opt="KEY:DVR", timeout=10.0):
 
     def read_until(marker, deadline):
         out = b""
-        while time.time() < deadline and (marker is None or marker not in out):
+        while time.monotonic() < deadline and (marker is None or marker not in out):
             try:
                 chunk = s.recv(65536)
                 if not chunk:
@@ -62,11 +64,11 @@ def tv_set_arc(tv_host, tv_port, mode, key_opt="KEY:DVR", timeout=10.0):
         return out
 
     try:
-        read_until(None, time.time() + 2.0)
+        read_until(None, time.monotonic() + 2.0)
         s.sendall(b"stty -echo 2>/dev/null; PS1=; PS2=\n")
-        read_until(None, time.time() + 1.0)
+        read_until(None, time.monotonic() + 1.0)
         s.sendall(cmd.encode())
-        out = read_until(b"__END__", time.time() + timeout)
+        out = read_until(b"__END__", time.monotonic() + timeout)
     finally:
         s.close()
     text = re.sub(rb"\xff[\xfb-\xfe].|\xff\xfa.*?\xff\xf0|\r", b"", out, flags=re.S).decode(errors="replace")
@@ -85,30 +87,75 @@ def beam_audio_code(beam_host):
         return None
 
 
-def jellyfin_sessions(base_url, api_key):
-    req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/Sessions",
-        headers={
+def beam_mode_from_code(code):
+    if code == "33554434":
+        return "PCM"
+    if code == "84934713":
+        return "DD"
+    return None
+
+
+class JellyfinClient:
+    """Persistent HTTP/1.1 Keep-Alive client for low-overhead /Sessions polling."""
+
+    def __init__(self, base_url, api_key, timeout=4.0):
+        u = urllib.parse.urlparse(base_url.rstrip("/"))
+        self.scheme = u.scheme or "http"
+        self.host = u.hostname or "127.0.0.1"
+        self.port = u.port or (443 if self.scheme == "https" else 80)
+        self.path = f"{u.path}/Sessions"
+        self.timeout = timeout
+        self.headers = {
             "Authorization": f'MediaBrowser Token="{api_key}"',
             "Accept": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=4.0) as r:
-        return json.loads(r.read().decode())
+            "Connection": "keep-alive",
+        }
+        self._conn = None
+
+    def _connect(self):
+        if self._conn is None:
+            cls = http.client.HTTPSConnection if self.scheme == "https" else http.client.HTTPConnection
+            self._conn = cls(self.host, self.port, timeout=self.timeout)
+        return self._conn
+
+    def close(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def sessions(self):
+        for attempt in range(2):
+            conn = self._connect()
+            try:
+                conn.request("GET", self.path, headers=self.headers)
+                resp = conn.getresponse()
+                body = resp.read()
+                if resp.status != 200:
+                    raise RuntimeError(f"Jellyfin HTTP {resp.status}")
+                return json.loads(body.decode())
+            except (http.client.HTTPException, OSError):
+                self.close()
+                if attempt == 1:
+                    raise
 
 
-def active_audio_info(sessions, device_filter):
-    """Return (track_key, channels, title, device) for the matching playing session."""
+def inspect_sessions(sessions, device_filter):
+    """Return ('playing', track_key, channels, title, dev) | ('paused',) | ('idle',)."""
     filt = (device_filter or "").lower()
+    saw_paused = False
     for s in sessions:
         item = s.get("NowPlayingItem")
         if not item:
             continue
-        ps = s.get("PlayState") or {}
-        if ps.get("IsPaused"):
-            continue
         dev = f"{s.get('DeviceName', '')} {s.get('Client', '')}".strip()
         if filt and filt not in dev.lower():
+            continue
+        ps = s.get("PlayState") or {}
+        if ps.get("IsPaused"):
+            saw_paused = True
             continue
 
         item_id = item.get("Id", "")
@@ -129,18 +176,8 @@ def active_audio_info(sessions, device_filter):
             default_st = next((st for st in audio_streams if st.get("IsDefault")), audio_streams[0])
             channels = default_st.get("Channels")
 
-        if channels is not None:
-            return (item_id, aidx), int(channels), title, dev
-        return (item_id, aidx), None, title, dev
-    return None
-
-
-def beam_mode_from_code(code):
-    if code == "33554434":
-        return "PCM"
-    if code == "84934713":
-        return "DD"
-    return None
+        return ("playing", (item_id, aidx), int(channels) if channels is not None else None, title, dev)
+    return ("paused",) if saw_paused else ("idle",)
 
 
 def main():
@@ -153,7 +190,7 @@ def main():
     ap.add_argument("--beam", default="", help="Optional Sonos Beam IP to check/log live HTAudioInCode")
     ap.add_argument("--key", default="KEY:DVR", help="Keep this libArcToggle key armed on injection")
     ap.add_argument("--interval", type=float, default=2.0, help="Poll interval in seconds")
-    ap.add_argument("--idle-delay", type=float, default=10.0, help="Seconds idle/unknown before defaulting back to DD")
+    ap.add_argument("--idle-delay", type=float, default=10.0, help="Seconds stopped/unknown before defaulting back to DD")
     ap.add_argument("--dry-run", action="store_true", help="Print decisions without calling the TV")
     ap.add_argument("--once", action="store_true", help="Check once and exit")
     args = ap.parse_args()
@@ -164,10 +201,12 @@ def main():
     signal.signal(signal.SIGINT, handle_sig)
     signal.signal(signal.SIGTERM, handle_sig)
 
+    jf = JellyfinClient(args.jellyfin, args.api_key)
     last_key = None
     last_mode = None
     idle_since = None
     tv_down_logged = False
+    last_err = None
 
     def apply_mode(want, reason):
         nonlocal last_mode, tv_down_logged
@@ -204,37 +243,47 @@ def main():
         f"(idle/unknown -> DD after {args.idle_delay:.0f}s)",
         flush=True,
     )
-    while not STOP:
-        try:
-            sessions = jellyfin_sessions(args.jellyfin, args.api_key)
-            info = active_audio_info(sessions, args.device)
-            if info:
-                idle_since = None
-                track_key, channels, title, dev = info
-                if channels is None:
-                    want = "DD"
-                    desc = f"{dev}: '{title}' (unknown ch -> default DD)"
+    try:
+        while not STOP_EVENT.is_set():
+            try:
+                sessions = jf.sessions()
+                if last_err is not None:
+                    print("[arc-sync] Jellyfin connection restored", flush=True)
+                    last_err = None
+                state = inspect_sessions(sessions, args.device)
+                if state[0] == "playing":
+                    idle_since = None
+                    _, track_key, channels, title, dev = state
+                    if channels is None:
+                        want = "DD"
+                        desc = f"{dev}: '{title}' (unknown ch -> default DD)"
+                    else:
+                        want = "PCM" if channels <= 2 else "DD"
+                        desc = f"{dev}: '{title}' ({channels}ch)"
+                    if track_key != last_key:
+                        if apply_mode(want, desc):
+                            last_key = track_key
+                elif state[0] == "paused":
+                    # Hold active ARC mode across pauses so unpausing stereo never drops audio.
+                    idle_since = None
                 else:
-                    want = "PCM" if channels <= 2 else "DD"
-                    desc = f"{dev}: '{title}' ({channels}ch)"
-                if track_key != last_key:
-                    if apply_mode(want, desc):
-                        last_key = track_key
-            else:
-                now = time.monotonic()
-                if idle_since is None:
-                    idle_since = now
-                if last_key != "__IDLE__" and (args.once or (now - idle_since) >= args.idle_delay):
-                    if apply_mode("DD", "idle/unknown source"):
-                        last_key = "__IDLE__"
-        except urllib.error.HTTPError as e:
-            print(f"[arc-sync] Jellyfin HTTP {e.code}: check API key", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"[arc-sync] poll error: {e}", file=sys.stderr, flush=True)
+                    now = time.monotonic()
+                    if idle_since is None:
+                        idle_since = now
+                    if last_key != "__IDLE__" and (args.once or (now - idle_since) >= args.idle_delay):
+                        if apply_mode("DD", "idle/unknown source"):
+                            last_key = "__IDLE__"
+            except Exception as e:
+                err_str = str(e)
+                if err_str != last_err:
+                    print(f"[arc-sync] poll error: {err_str}", file=sys.stderr, flush=True)
+                    last_err = err_str
 
-        if args.once:
-            break
-        time.sleep(args.interval)
+            if args.once:
+                break
+            STOP_EVENT.wait(args.interval)
+    finally:
+        jf.close()
 
 
 if __name__ == "__main__":

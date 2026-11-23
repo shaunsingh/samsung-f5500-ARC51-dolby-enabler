@@ -439,11 +439,14 @@ static void test_pdptune(const char *libpath)
     CHECK(g_panel[DUTY2] == 0);
     fw_write_i2c(&g_logic, DUTY2, 0x80);
     CHECK(g_panel[DUTY2] == 139);
-    /* Thermal / Eco / Cell Light < 20 dimming (APC_OFFSET > 0) holds duty_2 at stock 128. */
+    /* Thermal / Eco / Cell Light < 20 dimming (APC_OFFSET > 0) immediately drops duty_2 to stock 128,
+     * and returning APC_OFFSET to 0 immediately re-enables the boost without waiting for a DUTY2 write. */
     fw_write_i2c(&g_logic, APC_OFFSET, 50);
+    CHECK(g_panel[DUTY2] == 0x80);
     fw_write_i2c(&g_logic, DUTY2, 0x80);
     CHECK(g_panel[DUTY2] == 0x80);
     fw_write_i2c(&g_logic, APC_OFFSET, 0);
+    CHECK(g_panel[DUTY2] == 139);
     fw_write_i2c(&g_logic, DUTY2, 0x80);
     CHECK(g_panel[DUTY2] == 139);
     fw_write_i2c(&g_logic, DEEP_BLACK, 0);
